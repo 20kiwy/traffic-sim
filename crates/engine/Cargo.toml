@@ -1,0 +1,9 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gdmath = { workspace = true }
+roads = { workspace = true }

@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/*",
+    "apps/egui-app",
+    "apps/roadkit-cli",
+    "apps/yakui-app",
+    "xtask",
+]
+default-members = [
+    "crates/gdmath", "crates/gdscript", "crates/roads", "crates/roadkit",
+    "crates/egui-kit", "crates/engine", "crates/data", "crates/bridge",
+    "crates/toolkit", "crates/ui",
+    "apps/egui-app", "apps/roadkit-cli", "apps/yakui-app", "xtask",
+]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+egui = "0.28.1"
+eframe = { version = "0.28.1", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+    "accesskit",
+] }
+gdmath = { path = "crates/gdmath" }
+gdscript = { path = "crates/gdscript" }
+roads = { path = "crates/roads" }
+roadkit = { path = "crates/roadkit" }
+egui-kit = { path = "crates/egui-kit" }
+engine = { path = "crates/engine" }
+tsdata = { path = "crates/data" }
+bridge = { path = "crates/bridge" }
+toolkit = { path = "crates/toolkit" }
+tsui = { path = "crates/ui" }
+egui-app = { path = "apps/egui-app" }
+roadkit-cli = { path = "apps/roadkit-cli" }
+yakui-app = { path = "apps/yakui-app" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
+debug = 0
+
+# keep GUI + math deps fast even in debug builds
+[profile.dev.package."*"]
+opt-level = 2
+debug = 0

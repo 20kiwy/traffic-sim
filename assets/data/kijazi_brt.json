@@ -1,0 +1,289 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.11 87bfad18",
+  "osm3s": {
+    "timestamp_osm_base": "2026-07-15T15:22:01Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+
+{
+  "type": "relation",
+  "id": 6203372,
+  "tags": {
+    "from": "Kimara Mwisho",
+    "name": "Kimara Mwisho - Kivukoni",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport:version": "2",
+    "ref": "198",
+    "route": "bus",
+    "to": "Kivukoni",
+    "type": "route",
+    "via": "Morogoro Road"
+  }
+},
+{
+  "type": "relation",
+  "id": 6203373,
+  "tags": {
+    "from": "Kivukoni",
+    "name": "Kivukoni - Kimara Mwisho",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport:version": "2",
+    "ref": "198",
+    "route": "bus",
+    "to": "Kimara Mwisho",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892376,
+  "tags": {
+    "from": "Morocco",
+    "name": "Morocco_Kimara",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Kimara",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892387,
+  "tags": {
+    "from": "Morocco",
+    "name": "Morocco_Gerezani",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Gerezani",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892395,
+  "tags": {
+    "from": "Gerezani",
+    "name": "Gerezani_Morocco",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Morocco",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892404,
+  "tags": {
+    "from": "Kimara",
+    "name": "kimara_Morocco",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Morocco",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892527,
+  "tags": {
+    "from": "Kivukoni",
+    "name": "kivukoni_Morocco",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Morocco",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892530,
+  "tags": {
+    "from": "Morocco",
+    "name": "Morocco_Kivukoni",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Kivukoni",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892544,
+  "tags": {
+    "from": "Kivukoni",
+    "name": "Kivukoni_Kimara",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Kimara",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892584,
+  "tags": {
+    "from": "Kimara",
+    "name": "Kimara_Kivukoni",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Kivukoni",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892595,
+  "tags": {
+    "from": "Kimara",
+    "name": "Kimara_Gerezani",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Gerezani",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892604,
+  "tags": {
+    "from": "Gerezani",
+    "name": "Gerezani_Kimara",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Kimara",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892617,
+  "tags": {
+    "from": "Ubungo",
+    "name": "Ubungo_Morocco",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Morocco",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892620,
+  "tags": {
+    "from": "Morocco",
+    "name": "Morocco_Ubungo",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Ubungo",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892627,
+  "tags": {
+    "from": "Ubungo",
+    "name": "Ubungo_Kivukoni",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Kivukoni",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892628,
+  "tags": {
+    "from": "Kivukoni",
+    "name": "Kivukoni_Ubungo",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Ubungo",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892639,
+  "tags": {
+    "from": "Ubungo",
+    "name": "Ubungo_Gerezani",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "to": "Gerezani",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 6892645,
+  "tags": {
+    "from": "Gerezani",
+    "name": "Gerezani_Ubungo",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "public_transport": "2",
+    "public_transport:version": "2",
+    "route": "bus",
+    "type": "route"
+  }
+},
+{
+  "type": "relation",
+  "id": 8278829,
+  "tags": {
+    "name": "Gerezani - Muhimbili",
+    "network": "UDART",
+    "network:wikidata": "Q16954205",
+    "operator": "DART",
+    "ref": "199",
+    "route": "bus",
+    "type": "route"
+  }
+}
+
+  ]
+}

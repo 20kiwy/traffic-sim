@@ -1,0 +1,184 @@
+{
+  "name": "Terrazone roadkit assets",
+  "note": "GLB props rendered by the 3D road preview (GRG-style scene dressing)",
+  "assets": [
+    {
+      "id": "milestone",
+      "file": "assets/glb/milestone.glb",
+      "bytes": 3064,
+      "role": "route marker"
+    },
+    {
+      "id": "streetlight",
+      "file": "assets/glb/streetlight.glb",
+      "bytes": 4816,
+      "role": "furniture"
+    },
+    {
+      "id": "tree",
+      "file": "assets/glb/tree.glb",
+      "bytes": 4608,
+      "role": "roadside vegetation"
+    },
+    {
+      "id": "vehicle",
+      "file": "assets/glb/vehicle.glb",
+      "bytes": 11716,
+      "role": "traffic prop"
+    },
+    {
+      "id": "junctionMarker",
+      "file": "assets/glb/junctionMarker.glb",
+      "bytes": 2848,
+      "role": "junction marker"
+    },
+    {
+      "id": "trafficLightTz",
+      "file": "assets/glb/traffic_light_tz.glb",
+      "bytes": 8772,
+      "role": "traffic signal"
+    },
+    {
+      "id": "trafficLightUsa",
+      "file": "assets/glb/traffic_light_usa.glb",
+      "bytes": 8764,
+      "role": "traffic signal"
+    },
+    {
+      "id": "trafficLightEu",
+      "file": "assets/glb/traffic_light_eu.glb",
+      "bytes": 6612,
+      "role": "traffic signal"
+    },
+    {
+      "id": "signStop",
+      "file": "assets/glb/sign_stop.glb",
+      "bytes": 5748,
+      "role": "traffic sign"
+    },
+    {
+      "id": "signYield",
+      "file": "assets/glb/sign_yield.glb",
+      "bytes": 2700,
+      "role": "traffic sign"
+    },
+    {
+      "id": "signSpeed50",
+      "file": "assets/glb/sign_speed_50.glb",
+      "bytes": 8556,
+      "role": "traffic sign"
+    },
+    {
+      "id": "signSpeed80",
+      "file": "assets/glb/sign_speed_80.glb",
+      "bytes": 9420,
+      "role": "traffic sign"
+    },
+    {
+      "id": "signNoEntry",
+      "file": "assets/glb/sign_no_entry.glb",
+      "bytes": 6824,
+      "role": "traffic sign"
+    },
+    {
+      "id": "signWarning",
+      "file": "assets/glb/sign_warning.glb",
+      "bytes": 2916,
+      "role": "traffic sign"
+    },
+    {
+      "id": "signRoadName",
+      "file": "assets/glb/sign_road_name.glb",
+      "bytes": 5316,
+      "role": "traffic sign"
+    },
+    {
+      "id": "signPedestrian",
+      "file": "assets/glb/sign_pedestrian.glb",
+      "bytes": 7260,
+      "role": "traffic sign"
+    },
+    {
+      "id": "brtStation",
+      "file": "assets/glb/brt_station.glb",
+      "bytes": 20836,
+      "role": "brt station"
+    },
+    {
+      "id": "brtShelterSmall",
+      "file": "assets/glb/brt_shelter_small.glb",
+      "bytes": 18244,
+      "role": "brt station"
+    },
+    {
+      "id": "4way_1x1",
+      "file": "assets/glb/4way_1x1.glb",
+      "bytes": 11360,
+      "role": "junction prefab (WFC tile)",
+      "note": "4-way intersection prefab (single carriageway, GRG custom container)"
+    },
+    {
+      "id": "4way_2x2",
+      "file": "assets/glb/4way_2x2.glb",
+      "bytes": 17892,
+      "role": "junction prefab (WFC tile)",
+      "note": "4-way intersection prefab (dual carriageway)"
+    },
+    {
+      "id": "3way_1x1",
+      "file": "assets/glb/3way_1x1.glb",
+      "bytes": 9240,
+      "role": "junction prefab (WFC tile)",
+      "note": "T-junction prefab (single)"
+    },
+    {
+      "id": "3way_2x2",
+      "file": "assets/glb/3way_2x2.glb",
+      "bytes": 19680,
+      "role": "junction prefab (WFC tile)",
+      "note": "T-junction prefab (dual)"
+    },
+    {
+      "id": "roundabout_1x1",
+      "file": "assets/glb/roundabout_1x1.glb",
+      "bytes": 12824,
+      "role": "junction prefab (WFC tile)",
+      "note": "roundabout prefab (single)"
+    },
+    {
+      "id": "roundabout_2x2",
+      "file": "assets/glb/roundabout_2x2.glb",
+      "bytes": 19756,
+      "role": "junction prefab (WFC tile)",
+      "note": "roundabout prefab (dual)"
+    },
+    {
+      "id": "splitter_1x1",
+      "file": "assets/glb/splitter_1x1.glb",
+      "bytes": 5516,
+      "role": "junction prefab (WFC tile)",
+      "note": "splitter prefab (single)"
+    },
+    {
+      "id": "splitter_2x2",
+      "file": "assets/glb/splitter_2x2.glb",
+      "bytes": 7132,
+      "role": "junction prefab (WFC tile)",
+      "note": "splitter prefab (dual)"
+    },
+    {
+      "id": "highway_onramp",
+      "file": "assets/glb/highway_onramp.glb",
+      "bytes": 8016,
+      "role": "junction prefab (WFC tile)",
+      "note": "highway on-ramp prefab"
+    },
+    {
+      "id": "highway_offramp",
+      "file": "assets/glb/highway_offramp.glb",
+      "bytes": 6100,
+      "role": "junction prefab (WFC tile)",
+      "note": "highway off-ramp prefab"
+    }
+  ]
+}

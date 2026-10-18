@@ -1,0 +1,18 @@
+[package]
+name = "roadkit-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "roadkit-cli"
+path = "src/main.rs"
+
+[dependencies]
+gdmath = { workspace = true }
+gdscript = { workspace = true }
+roads = { workspace = true }
+roadkit = { workspace = true }
+
+image = { workspace = true }
+yakui-app = { workspace = true }

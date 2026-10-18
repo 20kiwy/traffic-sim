@@ -1,0 +1,74 @@
+{
+  "format": "roadkit-nodes/1",
+  "source": "Property audit of godot-road-generator (github.com/TheDuckCow/godot-road-generator) addons/road-generator/nodes/*.gd + procgen/*.gd. RoadKit Godot adds the [roadkit] entries.",
+  "scene_tree": {
+    "root": "RoadManager",
+    "children": "RoadContainer (one per road) > RoadPoint chain; RoadIntersection nodes are detected automatically and own RoadLane legs"
+  },
+  "nodes": [
+    {
+      "class": "RoadManager",
+      "description": "Scene root (GRG road_manager.gd). Groups all containers, holds global defaults.",
+      "properties": [
+        { "name": "profile",            "kind": "enum",    "options": ["Standard", "Lowpoly"], "default": "Standard", "hint": "GRG: low-poly preview profile" },
+        { "name": "is_lowpoly",         "kind": "bool",    "default": false, "hint": "current drag-time low-poly state" },
+        { "name": "auto_junction",      "kind": "bool",    "default": true,  "hint": "[roadkit] detect crossings / T / endpoint joins automatically" },
+        { "name": "auto_roundabout",    "kind": "bool",    "default": true,  "hint": "[roadkit] 3+ leg junctions become roundabouts" }
+      ]
+    },
+    {
+      "class": "RoadContainer",
+      "description": "One road (GRG road_container.gd). Chains RoadPoints, sweeps the procedural mesh, hosts GLB props.",
+      "properties": [
+        { "name": "create_geo",           "kind": "bool",  "default": true,  "hint": "GRG: false = custom mesh (GLB prefab) replaces the procedural surface" },
+        { "name": "density",              "kind": "float", "default": 2.0,   "min": 0.5, "max": 12.0, "hint": "GRG: loop density multiplier" },
+        { "name": "use_lowpoly_preview",  "kind": "bool",  "default": true,  "hint": "GRG: divide loop density while dragging" },
+        { "name": "draw_edges",           "kind": "bool",  "default": true,  "hint": "GRG: exterior edge curves" },
+        { "name": "draw_lanes_editor",    "kind": "bool",  "default": true,  "hint": "GRG: lane debug curves in editor" },
+        { "name": "draw_lanes_game",      "kind": "bool",  "default": false, "hint": "GRG: lane curves at runtime" },
+        { "name": "create_edge_curves",   "kind": "bool",  "default": true,  "hint": "GRG: decoration edge curves" },
+        { "name": "material_resource",    "kind": "string","default": "road_texture.material", "hint": "GRG: surface material applied over geometry (texture on top)" },
+        { "name": "edge_rp_locals",       "kind": "array", "default": "[]",  "hint": "GRG join table: local exit RoadPoints" },
+        { "name": "edge_rp_targets",      "kind": "array", "default": "[]",  "hint": "GRG join table: neighbor container points" }
+      ]
+    },
+    {
+      "class": "RoadPoint",
+      "description": "One cross-section on the chain (GRG road_point.gd). Position + Bezier magnitudes + full cross-section.",
+      "properties": [
+        { "name": "position",    "kind": "vector3", "default": "0,0,0",  "hint": "x east, y elevation, z south (meters)" },
+        { "name": "bearing",     "kind": "float",   "default": 0.0,      "min": -360.0, "max": 360.0, "unit": "deg", "hint": "travel direction" },
+        { "name": "prior_mag",   "kind": "float",   "default": 30.0,     "min": 0.5, "max": 500.0, "unit": "m", "hint": "Bezier handle toward the previous point (GRG prior_mag)" },
+        { "name": "next_mag",    "kind": "float",   "default": 30.0,     "min": 0.5, "max": 500.0, "unit": "m", "hint": "Bezier handle toward the next point (GRG next_mag)" },
+        { "name": "lanes",       "kind": "int",     "default": 2,        "min": 1, "max": 12, "hint": "total lanes (GRG lanes array simplified)" },
+        { "name": "lane_width",  "kind": "float",   "default": 3.5,      "min": 1.0, "max": 8.0, "unit": "m", "hint": "GRG lane_width (default 4.0 there)" },
+        { "name": "shoulder_l",  "kind": "float",   "default": 0.0,      "min": 0.0, "max": 6.0, "unit": "m", "hint": "GRG shoulder_width_l" },
+        { "name": "shoulder_r",  "kind": "float",   "default": 0.0,      "min": 0.0, "max": 6.0, "unit": "m", "hint": "GRG shoulder_width_r" },
+        { "name": "median",      "kind": "float",   "default": 0.0,      "min": 0.0, "max": 12.0, "unit": "m", "hint": "[roadkit] physical center median width (GRG DIVIDER alignment)" },
+        { "name": "pathway_l",   "kind": "float",   "default": 0.0,      "min": 0.0, "max": 8.0, "unit": "m", "hint": "[roadkit] sidewalk/pathway strip left of pavement" },
+        { "name": "pathway_r",   "kind": "float",   "default": 0.0,      "min": 0.0, "max": 8.0, "unit": "m", "hint": "[roadkit] sidewalk/pathway strip right of pavement" },
+        { "name": "oneway",      "kind": "bool",    "default": false,    "hint": "GRG traffic_dir single direction" },
+        { "name": "auto_join",   "kind": "bool",    "default": true,     "hint": "[roadkit] endpoint snaps to neighbors within snap_m" }
+      ]
+    },
+    {
+      "class": "RoadIntersection",
+      "description": "Detected automatically where 2+ roads meet (GRG road_intersection.gd + procgen/intersection_ngon.gd). Classification follows the plugin's two tracks: procedural n-gon crossing, or roundabout ring.",
+      "properties": [
+        { "name": "mode",           "kind": "enum",  "options": ["auto", "crossing", "roundabout"], "default": "auto", "hint": "[roadkit] force the junction type (auto follows detection)" },
+        { "name": "arms",           "kind": "int",   "default": 0, "hint": "leg count (read-only, from detection)" },
+        { "name": "island_radius",  "kind": "float", "default": 5.0, "min": 2.0, "max": 20.0, "unit": "m", "hint": "[roadkit] roundabout island radius" },
+        { "name": "stop_ext",       "kind": "float", "default": 1.4, "min": 1.0, "max": 3.0, "hint": "[roadkit] n-gon stop-line extension factor" }
+      ]
+    },
+    {
+      "class": "RoadLane",
+      "description": "Lane path through an intersection (GRG road_lane.gd). Left/right neighbor tags drive turn connectivity.",
+      "properties": [
+        { "name": "lane_next_tag",  "kind": "string", "default": "F0", "hint": "GRG: next lane tag" },
+        { "name": "lane_prior_tag", "kind": "string", "default": "F0", "hint": "GRG: prior lane tag" },
+        { "name": "width_scale",    "kind": "float",  "default": 1.0, "min": 0.1, "max": 3.0, "hint": "GRG width_scale" }
+      ]
+    }
+  ]
+}

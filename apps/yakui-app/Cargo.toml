@@ -1,0 +1,24 @@
+[package]
+name = "yakui-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "yakui_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "yakui-app"
+path = "src/main.rs"
+
+[dependencies]
+gdmath = { workspace = true }
+roads = { workspace = true }
+roadkit = { workspace = true }
+tsui = { workspace = true }
+engine = { workspace = true }
+tsdata = { workspace = true }
+bridge = { workspace = true }
+toolkit = { workspace = true }
+image = { workspace = true }

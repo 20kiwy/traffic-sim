@@ -1,0 +1,10 @@
+[package]
+name = "toolkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gdmath = { workspace = true }
+roads = { workspace = true }
+roadkit = { workspace = true }
