@@ -1,0 +1,12 @@
+[submodule "_sources/godot-road-generator"]
+	path = _sources/godot-road-generator
+	url = https://github.com/TheDuckCow/godot-road-generator.git
+[submodule "_sources/Traffic-Toolkit-DOTS"]
+	path = _sources/Traffic-Toolkit-DOTS
+	url = https://github.com/pekaram/Traffic-Toolkit-DOTS.git
+[submodule "_sources/Mapkit"]
+	path = _sources/Mapkit
+	url = https://github.com/kiwy-monzy/Mapkit.git
+[submodule "_sources/egregoria"]
+	path = _sources/egregoria
+	url = https://github.com/uriopass/egregoria.git
