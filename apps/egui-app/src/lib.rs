@@ -17,3 +17,7 @@ pub mod state;
 pub mod statusbar;
 pub mod theme;
 pub mod viewport3d;
+
+/// WASM entry (browser engine preview) — compiled only for wasm32 targets.
+#[cfg(target_arch = "wasm32")]
+pub mod web;

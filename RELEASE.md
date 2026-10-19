@@ -60,3 +60,33 @@ Build
     the roadkit-cli (#1a1c20) and the editor (#1e222a) both get seamless fades
 - verified: egui-app --selftest ALL PASS, --uitest 246/246, new reference
   renders screenshots/v022{editor_grid,ramps_grid,city_grid}.png
+
+## v0.2.3
+
+- Engine terrain environment copied into the toolkit 3D viewport ("terrazon" look,
+  verbatim from the yakui-app engine):
+  - grass-ramp terrain ground (engine terrain.rs palette: low grass -> grass ->
+    dry grass -> dirt -> rock -> sand by height) replaces the near-black
+    grid-only earth bands — heightfield mode AND a new flat grass fan when the
+    terrain connector is off
+  - engine sky: pale-haze clear/fog color (SKY_CLEAR) + zenith->horizon sky
+    gradient painted above the horizon line (paint_sky post-pass, pitch-aware,
+    geometry reaching above the horizon preserved)
+  - ground rims (heightfield square + flat fan disc) fade to the fog color
+    pre-divided by the up-face lambert -> zero seam against the backdrop
+- Grid clarity pass (the "grid is not clear" fix):
+  - bright light lines (minor #d1dbbd-ish, major near-white, wider) that read
+    on bright grass instead of dark-on-dark
+  - line fade target now tracks the LOCAL ground color (same radial melt as
+    the fan / square melt as the heightfield) — no more ghost green dashes
+    floating over the sky at the rim
+  - grid extent clamped to the ground extent per mode (heightfield 1.2r,
+    grass fan 1.6r) — lines never float past the terrain edge
+  - origin axes X-red / Z-blue saturated like the engine gizmo
+- New render API: render_scene_env / render_scene_props_env + Env / ENV_DAY;
+  editor, roadkit-cli and yakui-app all render the day environment
+- WASM engine preview: egui-app gained a wasm32 web entry (eframe WebRunner +
+  glow WebGL2, console_error_panic_hook) — the SAME editor runs in the browser;
+  web-preview/ index.html loader, CI builds + deploys it to GitHub Pages
+- Verified: roadkit tests 7/7, egui-app selftest ALL PASS, reference renders
+  regenerated (screenshots/v023*.png)

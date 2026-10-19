@@ -5,7 +5,7 @@
 //! `cargo xtask dist` screenshots every scenario per version.
 
 use gdmath::{OrbitCam, Vec3};
-use roadkit::{build_scene_with_bg, render_scene, AssetLibrary, TextureLibrary};
+use roadkit::{build_scene_with_bg, render_scene_env, AssetLibrary, TextureLibrary};
 use roadkit::bridge_host::{self, SceneState};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -139,18 +139,18 @@ pub fn render_view_sim(
                 }
                 props.extend(sim.prop_instances(&world.scene.curves));
             }
-            let scene = build_scene_with_bg(&world.scene.curves, &world.scene.junctions, &props, &world.library, true, [26, 28, 32, 255]);
+            let scene = build_scene_with_bg(&world.scene.curves, &world.scene.junctions, &props, &world.library, true, roadkit::ENV_DAY.clear);
             if ss <= 1 {
-                return Ok(render_scene(&scene, &world.library, &world.textures, &cam, w, h, [26, 28, 32, 255], &[]));
+                return Ok(render_scene_env(&scene, &world.library, &world.textures, &cam, w, h, roadkit::ENV_DAY, &[]));
             }
-            let big = render_scene(
+            let big = render_scene_env(
                 &scene,
                 &world.library,
                 &world.textures,
                 &cam,
                 w * ss,
                 h * ss,
-                [26, 28, 32, 255],
+                roadkit::ENV_DAY,
                 &[],
             );
             Ok(box_downsample(&big, w * ss, h * ss, ss))
@@ -615,11 +615,11 @@ pub fn render_3d_camera(
         }
         props.extend(sim.prop_instances(&world.scene.curves));
     }
-    let scene = build_scene_with_bg(&world.scene.curves, &world.scene.junctions, &props, &world.library, true, [26, 28, 32, 255]);
+    let scene = build_scene_with_bg(&world.scene.curves, &world.scene.junctions, &props, &world.library, true, roadkit::ENV_DAY.clear);
     if ss <= 1 {
-        return render_scene(&scene, &world.library, &world.textures, cam, w, h, [26, 28, 32, 255], &[]);
+        return render_scene_env(&scene, &world.library, &world.textures, cam, w, h, roadkit::ENV_DAY, &[]);
     }
-    let big = render_scene(&scene, &world.library, &world.textures, cam, w * ss, h * ss, [26, 28, 32, 255], &[]);
+    let big = render_scene_env(&scene, &world.library, &world.textures, cam, w * ss, h * ss, roadkit::ENV_DAY, &[]);
     box_downsample(&big, w * ss, h * ss, ss)
 }
 

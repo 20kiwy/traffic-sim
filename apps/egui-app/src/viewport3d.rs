@@ -84,7 +84,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     app.cam.yaw = 0.65;
                 }
                 ui.separator();
-                ui.toggle_value(&mut app.render.show_grid, "grid").on_hover_text("Show the reference ground grid (environment is grid-only — no grass)");
+                ui.toggle_value(&mut app.render.show_grid, "grid").on_hover_text("Show the reference ground grid over the engine terrain environment");
                 ui.toggle_value(&mut app.render.show_props, "props").on_hover_text("Show GLB props");
                 ui.toggle_value(&mut app.render.show_lanes, "lanes").on_hover_text("Show the generated AI RoadLanes (GRG draw_lanes)");
                 ui.toggle_value(&mut app.render.spin, "spin").on_hover_text("Auto-orbit the camera");
@@ -142,7 +142,8 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 app.cam.yaw += 0.006;
             }
 
-            let bg = [30, 34, 42, 255];
+            // engine day environment: pale haze fog + zenith sky (yakui-app look)
+            let env = roadkit::ENV_DAY;
             // traffic sim: advance one frame step and render its vehicles
             let mut extra: Vec<roadkit::PropDraw> = Vec::new();
             if app.render.sim_on {
@@ -188,7 +189,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     // props hidden: render without prop draws (no scene clone)
                     &scene
                 };
-                rgba = roadkit::render_scene_props(target, &app.assets, &app.textures, &app.cam, w, h, bg, &extra, app.render.show_props);
+                rgba = roadkit::render_scene_props_env(target, &app.assets, &app.textures, &app.cam, w, h, env, &extra, app.render.show_props);
                 app.render.render_ms = t0.elapsed().as_secs_f32() * 1000.0;
                 app.render.last_sig = sig;
                 app.render.dirty = false;

@@ -316,18 +316,17 @@ pub fn render_frame(
     for b in &sc.bridge_parts {
         scene.parts.push(mesh_to_scene_part(b));
     }
-    let big = roadkit::scene::render_scene(
+    let big = roadkit::scene::render_scene_env(
         &scene,
         &sc.library,
         &sc.textures,
         cam,
         w * ss,
         h * ss,
-        SKY_CLEAR,
+        roadkit::ENV_DAY,
         &[],
     );
     let mut rgba = if ss > 1 { downsample(&big, w * ss, h * ss, ss) } else { big };
-    paint_sky(&mut rgba, w, h, cam.pitch);
 
     if hud {
         let mut buf = rgba;
@@ -360,44 +359,6 @@ pub fn render_frame(
         return buf;
     }
     rgba
-}
-
-/// Sky clear color (light haze — also fills voids beyond the terrain square).
-const SKY_CLEAR: [u8; 4] = [178, 199, 220, 255];
-
-/// Replace flat background pixels ABOVE the horizon with a real-world sky
-/// gradient (zenith blue -> pale haze). Only pixels equal to the clear color
-/// are touched, so geometry that reaches above the horizon (bridge decks,
-/// buildings) is preserved. Horizon screen row for a roll-free OrbitCam with
-/// vertical fov 0.9: y_h = h/2 · (1 − tan(pitch)/tan(fov/2)); row 0 = top.
-fn paint_sky(rgba: &mut [u8], w: usize, h: usize, pitch: f32) {
-    const FOV_V: f32 = 0.9;
-    let t = pitch.tan() / (FOV_V / 2.0).tan();
-    let y_h = ((h as f32) / 2.0 * (1.0 - t)).round();
-    let y_h = (y_h as i32).clamp(0, h as i32) as usize;
-    if y_h == 0 {
-        return;
-    }
-    let zen = [92.0f32, 138.0, 198.0];
-    let hor = [199.0f32, 214.0, 229.0];
-    for y in 0..y_h {
-        let f = (y as f32 / y_h as f32).powf(0.8);
-        let r = (zen[0] + (hor[0] - zen[0]) * f) as u8;
-        let g = (zen[1] + (hor[1] - zen[1]) * f) as u8;
-        let b = (zen[2] + (hor[2] - zen[2]) * f) as u8;
-        let row = y * w * 4;
-        for x in 0..w {
-            let i = row + x * 4;
-            let is_bg = (rgba[i] as i32 - SKY_CLEAR[0] as i32).abs() <= 4
-                && (rgba[i + 1] as i32 - SKY_CLEAR[1] as i32).abs() <= 4
-                && (rgba[i + 2] as i32 - SKY_CLEAR[2] as i32).abs() <= 4;
-            if is_bg {
-                rgba[i] = r;
-                rgba[i + 1] = g;
-                rgba[i + 2] = b;
-            }
-        }
-    }
 }
 
 fn downsample(src: &[u8], sw: usize, sh: usize, f: usize) -> Vec<u8> {
