@@ -19,6 +19,9 @@ pub struct ScenePart {
     pub positions: Vec<Vec3>,
     pub indices: Vec<u32>,
     pub color: [f32; 4],
+    /// per-vertex colors (when non-empty; overrides `color`) — used by the
+    /// distance-faded grid
+    pub vcolors: Vec<[f32; 4]>,
     /// per-vertex uvs (when textured)
     pub uv: Vec<[f32; 2]>,
     /// texture slot (roadkit::textures); -1 = flat color
@@ -63,7 +66,42 @@ pub fn build_scene(
     library: &AssetLibrary,
     show_grid: bool,
 ) -> Scene {
-    build_scene_full(curves, junctions, props, &[], library, show_grid, false, None)
+    build_scene_full_with_bg(
+        curves,
+        junctions,
+        props,
+        &[],
+        library,
+        show_grid,
+        false,
+        None,
+        GRID_BACKDROP,
+    )
+}
+
+/// `build_scene` with an explicit backdrop color (u8 rgba): the grid fade
+/// target and the stage-disc rim. Callers that render against a different
+/// bg (the CLI uses #1a1c20) pass their own so the faded grid edge
+/// disappears seamlessly into THEIR background.
+pub fn build_scene_with_bg(
+    curves: &[RoadCurve],
+    junctions: &[roads::junction::Junction],
+    props: &[crate::props::PropInstance],
+    library: &AssetLibrary,
+    show_grid: bool,
+    bg: [u8; 4],
+) -> Scene {
+    build_scene_full_with_bg(
+        curves,
+        junctions,
+        props,
+        &[],
+        library,
+        show_grid,
+        false,
+        None,
+        [bg[0] as f32 / 255.0, bg[1] as f32 / 255.0, bg[2] as f32 / 255.0],
+    )
 }
 
 /// Full scene assembly: roads + junctions + props + AI-lane fins
@@ -81,6 +119,32 @@ pub fn build_scene_full(
     show_grid: bool,
     show_lanes: bool,
     terrain: Option<&roads::terrain::TerrainState>,
+) -> Scene {
+    build_scene_full_with_bg(
+        curves,
+        junctions,
+        props,
+        lanes,
+        library,
+        show_grid,
+        show_lanes,
+        terrain,
+        GRID_BACKDROP,
+    )
+}
+
+/// `build_scene_full` with an explicit grid backdrop (0..1 rgb).
+#[allow(clippy::too_many_arguments)]
+pub fn build_scene_full_with_bg(
+    curves: &[RoadCurve],
+    junctions: &[roads::junction::Junction],
+    props: &[crate::props::PropInstance],
+    lanes: &[roads::lane::RoadLane],
+    library: &AssetLibrary,
+    show_grid: bool,
+    show_lanes: bool,
+    terrain: Option<&roads::terrain::TerrainState>,
+    backdrop: [f32; 3],
 ) -> Scene {
     let _ = library; // props carry their own resolved indices
     // bbox of all curve points
@@ -128,6 +192,7 @@ pub fn build_scene_full(
                     .collect(),
                 indices: part.indices,
                 color: part.color,
+                vcolors: vec![],
                 uv: part.uv,
                 tex: part.tex,
             });
@@ -148,6 +213,7 @@ pub fn build_scene_full(
                         .collect(),
                     indices: part.indices,
                     color: part.color,
+                    vcolors: vec![],
                     uv: part.uv,
                     tex: part.tex,
                 });
@@ -168,6 +234,7 @@ pub fn build_scene_full(
                     .collect(),
                 indices: part.indices,
                 color: part.color,
+                vcolors: vec![],
                 uv: part.uv,
                 tex: part.tex,
             });
@@ -207,6 +274,7 @@ pub fn build_scene_full(
                     positions: vec![Vec3::new(ix, 0.05, iz)],
                     indices: vec![],
                     color: [1.2, 1.2, 1.2, 1.0],
+                    vcolors: vec![],
                     uv: vec![[(ix / 4.0) as f32, (iz / 4.0) as f32]],
                     tex: crate::textures::TEX_GRASS,
                 };
@@ -257,10 +325,10 @@ pub fn build_scene_full(
         let flatten = TerrainFlatten::new(t, curves);
         build_terrain_ground(&mut ground, t, &flatten, radius, cx, cz, &mut tris);
         if show_grid {
-            build_grid(&mut ground, radius, cx, cz, &mut tris, Some((t, &flatten)));
+            build_grid(&mut ground, radius, cx, cz, &mut tris, Some((t, &flatten)), backdrop);
         }
     } else if show_grid {
-        build_grid(&mut ground, radius, cx, cz, &mut tris, None);
+        build_grid(&mut ground, radius, cx, cz, &mut tris, None, backdrop);
     }
 
     let prop_count = prop_draws.len();
@@ -321,9 +389,9 @@ fn append_lane_fins(
 ) {
     const STEP: f64 = 6.0;
     let mut buckets: [ScenePart; 3] = [
-        ScenePart { positions: vec![], indices: vec![], color: fin_color(0), uv: vec![], tex: -1 },
-        ScenePart { positions: vec![], indices: vec![], color: fin_color(1), uv: vec![], tex: -1 },
-        ScenePart { positions: vec![], indices: vec![], color: fin_color(2), uv: vec![], tex: -1 },
+        ScenePart { positions: vec![], indices: vec![], color: fin_color(0), vcolors: vec![], uv: vec![], tex: -1 },
+        ScenePart { positions: vec![], indices: vec![], color: fin_color(1), vcolors: vec![], uv: vec![], tex: -1 },
+        ScenePart { positions: vec![], indices: vec![], color: fin_color(2), vcolors: vec![], uv: vec![], tex: -1 },
     ];
     for lane in lanes {
         let Some(c) = curves.get(lane.container) else {
@@ -523,6 +591,7 @@ fn build_terrain_ground(
                     LO[2] + (HI[2] - LO[2]) * f,
                     1.0,
                 ],
+                vcolors: vec![],
                 uv: vec![],
                 tex: -1,
             }
@@ -562,10 +631,37 @@ fn build_terrain_ground(
     }
 }
 
-/// Reference ground grid. With `flatten` (terrain enabled) the lines follow
-/// the heightfield (sampled per segment corner, 3 cm above the terrain);
-/// otherwise they stay flat at y = -0.02 exactly as the classic grid-only
-/// environment.
+/// Viewport backdrop the grid fades into (#1e222a — the egui-app viewport
+/// bg; the roadkit-cli bg #1a1c20 differs by ~4/255 per channel, invisible,
+/// and the distance fog finishes the blend toward whatever bg is in use).
+const GRID_BACKDROP: [f32; 3] = [30.0 / 255.0, 34.0 / 255.0, 42.0 / 255.0];
+/// Fade target when the grid rides the terrain (between the earth bands).
+const TERRAIN_BACKDROP: [f32; 3] = [0.235, 0.263, 0.315];
+
+/// The raster multiplies every fragment by `0.38 + 0.62 * (n·l)`; up-facing
+/// quads land on this exact factor. Colors that must render as exactly the
+/// backdrop (faded line ends, stage-disc rim) are pre-divided by it.
+fn up_shade() -> f32 {
+    let l = Vec3::new(0.4, 0.85, 0.3).normalized();
+    0.38 + 0.62 * l.y
+}
+
+fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
+    let t = ((x - a) / (b - a).max(1e-5)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Editor-grade reference ground grid (Godot-style):
+/// - adaptive spacing (10 / 25 / 50 / 100 m by scene radius), major line
+///   every 4th minor
+/// - origin axes tinted X-red / Z-blue like the viewport axis gizmo
+/// - every line fades with distance from the origin via per-vertex colors,
+///   so far segments melt into the backdrop instead of aliasing into the
+///   dashed speckle the old full-length uniform quads produced (the CPU
+///   raster has no MSAA — sub-pixel quads break up into dashes)
+/// - with terrain the lines follow the heightfield; flat at y = -0.02
+///   otherwise; grid-only mode also gets a faint radial "stage" disc that
+///   seats the environment (rim = exact backdrop → seamless edge)
 fn build_grid(
     ground: &mut Vec<ScenePart>,
     radius: f32,
@@ -573,71 +669,164 @@ fn build_grid(
     cz: f32,
     tris: &mut usize,
     flatten: Option<(&roads::terrain::TerrainState, &TerrainFlatten)>,
+    bg_backdrop: [f32; 3],
 ) {
-    let mut g = ScenePart {
-        positions: vec![],
-        indices: vec![],
-        color: [0.42, 0.46, 0.52, 1.0],
-        uv: vec![],
-        tex: -1,
+    let spacing = if radius <= 120.0 {
+        10.0
+    } else if radius <= 300.0 {
+        25.0
+    } else if radius <= 800.0 {
+        50.0
+    } else {
+        100.0
     };
-    let spacing = if radius > 300.0 { 50.0 } else { 25.0 };
-    let extent = radius * 1.6;
-    let hw = if radius > 300.0 { 0.2 } else { 0.08 };
+    let major_every = 4i64;
+    let n = ((radius * 1.6) / spacing).floor().max(2.0) as i64;
+    let extent = n as f32 * spacing; // exact multiple — no clipped edge line
 
-    let mut line_y = |a: Vec3, b: Vec3, g: &mut ScenePart| {
-        let base = g.positions.len() as u32;
+    let backdrop = if flatten.is_some() { TERRAIN_BACKDROP } else { bg_backdrop };
+    let inv_shade = 1.0 / up_shade();
+    let fade_to = [
+        backdrop[0] * inv_shade,
+        backdrop[1] * inv_shade,
+        backdrop[2] * inv_shade,
+    ];
+
+    // line classes: (color, half width, fade start, fade end) — fade radii
+    // in meters from the origin; everything is fully faded at the edge
+    let minor = ([0.270, 0.305, 0.365], 0.16, extent * 0.14, extent * 0.95); // #454e5d
+    let major = ([0.375, 0.415, 0.485], 0.34, extent * 0.34, extent * 1.00); // #5f6a7c
+    let axis_x = ([0.560, 0.294, 0.294], 0.46, extent * 0.45, extent * 1.00); // #8f4b4b
+    let axis_z = ([0.294, 0.373, 0.561], 0.46, extent * 0.45, extent * 1.00); // #4b5f8f
+    let classes = [minor, major, axis_x, axis_z];
+    let mut parts: Vec<ScenePart> = classes
+        .iter()
+        .map(|(c, ..)| ScenePart {
+            positions: vec![],
+            indices: vec![],
+            color: [c[0], c[1], c[2], 1.0],
+            vcolors: vec![],
+            uv: vec![],
+            tex: -1,
+        })
+        .collect();
+
+    // per-vertex color at a line vertex: line color -> backdrop by distance
+    let vcol = |x: f32, z: f32, cls: usize| -> [f32; 4] {
+        let (c, _, fs, fe) = classes[cls];
+        let d = (x * x + z * z).sqrt();
+        let f = 1.0 - smoothstep(fs, fe, d);
+        [
+            fade_to[0] + (c[0] - fade_to[0]) * f,
+            fade_to[1] + (c[1] - fade_to[1]) * f,
+            fade_to[2] + (c[2] - fade_to[2]) * f,
+            1.0,
+        ]
+    };
+
+    // one segment quad (a -> b) with per-vertex colors at the two ends
+    let seg = |p: &mut ScenePart, a: Vec3, b: Vec3, ca: [f32; 4], cb: [f32; 4], hw: f32| {
         let dir = (b - a).normalized();
         let side = Vec3::new(-dir.z, 0.0, dir.x) * hw;
-        g.positions.push(a - side);
-        g.positions.push(a + side);
-        g.positions.push(b - side);
-        g.positions.push(b + side);
-        g.indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+        let base = p.positions.len() as u32;
+        p.positions.push(a - side);
+        p.positions.push(a + side);
+        p.positions.push(b - side);
+        p.positions.push(b + side);
+        p.vcolors.extend_from_slice(&[ca, ca, cb, cb]);
+        p.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
     };
 
-    if let Some((t, fl)) = flatten {
-        // lines follow the heightfield: sample each segment corner so grid
-        // and hills never intersect (cheap — same vertex lattice density)
-        let mut k = -extent;
-        while k <= extent {
-            for (vertical, fixed) in [(true, k), (false, k)] {
-                let mut s0 = -extent;
-                while s0 < extent {
-                    let s1 = (s0 + spacing).min(extent);
-                    let (ax, az) = if vertical { (fixed, s0) } else { (s0, fixed) };
-                    let (bx, bz) = if vertical { (fixed, s1) } else { (s1, fixed) };
-                    let ya = fl.height(t, ax as f64, az as f64) as f32 + 0.03;
-                    let yb = fl.height(t, bx as f64, bz as f64) as f32 + 0.03;
-                    let a = Vec3::new(ax - cx, ya, az - cz);
-                    let b = Vec3::new(bx - cx, yb, bz - cz);
-                    line_y(a, b, &mut g);
-                    if s1 >= extent {
-                        break;
-                    }
-                    s0 = s1;
-                }
+    // height of a grid vertex (terrain-following or flat)
+    let height = |x: f32, z: f32| -> f32 {
+        match flatten {
+            Some((t, fl)) => fl.height(t, (x + cx) as f64, (z + cz) as f64) as f32 + 0.03,
+            None => -0.02,
+        }
+    };
+
+    // lines at i * spacing; i == 0 -> origin axis, i % 4 == 0 -> major
+    for i in -n..=n {
+        let k = i as f32 * spacing;
+        // class index per direction: fixed-x lines (varying z) carry the Z
+        // axis tint (classes[3]), fixed-z lines (varying x) the X axis tint
+        // (classes[2]); i % 4 == 0 -> major (1), else minor (0)
+        let (cls_z, cls_x) = if i == 0 {
+            (3usize, 2usize)
+        } else if i % major_every == 0 {
+            (1usize, 1usize)
+        } else {
+            (0usize, 0usize)
+        };
+        let mut s0 = -extent;
+        while s0 < extent {
+            let s1 = (s0 + spacing).min(extent);
+            // line along z (fixed x = k): the Z-axis class tint
+            {
+                let p = &mut parts[cls_z];
+                let hw = classes[cls_z].1;
+                let a = Vec3::new(k, height(k, s0), s0);
+                let b = Vec3::new(k, height(k, s1), s1);
+                seg(p, a, b, vcol(k, s0, cls_z), vcol(k, s1, cls_z), hw);
             }
-            if k >= extent {
+            // line along x (fixed z = k): the X-axis class tint
+            {
+                let p = &mut parts[cls_x];
+                let hw = classes[cls_x].1;
+                let a = Vec3::new(s0, height(s0, k), k);
+                let b = Vec3::new(s1, height(s1, k), k);
+                seg(p, a, b, vcol(s0, k, cls_x), vcol(s1, k, cls_x), hw);
+            }
+            if s1 >= extent {
                 break;
             }
-            k += spacing;
-        }
-    } else {
-        let y = -0.02f32;
-        let mut k = -extent;
-        while k <= extent {
-            for (a, b) in [
-                (Vec3::new(k, y, -extent), Vec3::new(k, y, extent)),
-                (Vec3::new(-extent, y, k), Vec3::new(extent, y, k)),
-            ] {
-                line_y(a, b, &mut g);
-            }
-            k += spacing;
+            s0 = s1;
         }
     }
-    *tris += g.indices.len() / 3;
-    ground.push(g);
+    for p in parts {
+        *tris += p.indices.len() / 3;
+        if !p.indices.is_empty() {
+            ground.push(p);
+        }
+    }
+
+    // faint radial stage disc (grid-only): seats the environment so the
+    // roads don't float in a void; rim = exact backdrop -> seamless edge
+    if flatten.is_none() {
+        const RING: usize = 48;
+        let glow = [
+            0.138 * inv_shade,
+            0.160 * inv_shade,
+            0.200 * inv_shade,
+        ];
+        let mut disc = ScenePart {
+            positions: vec![Vec3::new(0.0, -0.035, 0.0)],
+            indices: vec![],
+            color: [glow[0], glow[1], glow[2], 1.0],
+            vcolors: vec![[glow[0], glow[1], glow[2], 1.0]],
+            uv: vec![],
+            tex: -1,
+        };
+        for k in 0..=RING {
+            let a = k as f32 / RING as f32 * std::f32::consts::TAU;
+            let (x, z) = (a.cos() * extent, a.sin() * extent);
+            disc.positions.push(Vec3::new(x, -0.035, z));
+            let t = smoothstep(0.0, extent, (x * x + z * z).sqrt());
+            let t = t * t * (3.0 - 2.0 * t); // ease the radial falloff
+            disc.vcolors.push([
+                glow[0] + (fade_to[0] - glow[0]) * t,
+                glow[1] + (fade_to[1] - glow[1]) * t,
+                glow[2] + (fade_to[2] - glow[2]) * t,
+                1.0,
+            ]);
+        }
+        for k in 1..=RING {
+            disc.indices.extend_from_slice(&[0, k as u32, (k + 1) as u32]);
+        }
+        *tris += disc.indices.len() / 3;
+        ground.push(disc);
+    }
 }
 
 /// Render the scene to RGBA8 (props drawn through the asset library,
@@ -745,10 +934,15 @@ fn draw_all(
     for part in scene.ground.iter().chain(scene.parts.iter()) {
         let tex = textures.get(part.tex);
         let uvs = if tex.is_some() { Some(&part.uv[..]) } else { None };
+        let cols = if part.vcolors.is_empty() {
+            None
+        } else {
+            Some(&part.vcolors[..])
+        };
         frame.draw_mesh(
             &part.positions,
             &part.indices,
-            None,
+            cols,
             uvs,
             tex,
             &Mat4::IDENTITY,

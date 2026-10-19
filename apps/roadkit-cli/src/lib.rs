@@ -5,7 +5,7 @@
 //! `cargo xtask dist` screenshots every scenario per version.
 
 use gdmath::{OrbitCam, Vec3};
-use roadkit::{build_scene, render_scene, AssetLibrary, TextureLibrary};
+use roadkit::{build_scene_with_bg, render_scene, AssetLibrary, TextureLibrary};
 use roadkit::bridge_host::{self, SceneState};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -139,7 +139,7 @@ pub fn render_view_sim(
                 }
                 props.extend(sim.prop_instances(&world.scene.curves));
             }
-            let scene = build_scene(&world.scene.curves, &world.scene.junctions, &props, &world.library, true);
+            let scene = build_scene_with_bg(&world.scene.curves, &world.scene.junctions, &props, &world.library, true, [26, 28, 32, 255]);
             if ss <= 1 {
                 return Ok(render_scene(&scene, &world.library, &world.textures, &cam, w, h, [26, 28, 32, 255], &[]));
             }
@@ -615,7 +615,7 @@ pub fn render_3d_camera(
         }
         props.extend(sim.prop_instances(&world.scene.curves));
     }
-    let scene = build_scene(&world.scene.curves, &world.scene.junctions, &props, &world.library, true);
+    let scene = build_scene_with_bg(&world.scene.curves, &world.scene.junctions, &props, &world.library, true, [26, 28, 32, 255]);
     if ss <= 1 {
         return render_scene(&scene, &world.library, &world.textures, cam, w, h, [26, 28, 32, 255], &[]);
     }

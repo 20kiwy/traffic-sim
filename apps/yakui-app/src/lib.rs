@@ -275,6 +275,7 @@ fn mesh_to_scene_part(m: &roads::mesh3d::MeshPart) -> roadkit::scene::ScenePart 
         positions: m.positions.clone(),
         indices: m.indices.clone(),
         color: m.color,
+        vcolors: vec![],
         uv: m.uv.clone(),
         tex: m.tex,
     }

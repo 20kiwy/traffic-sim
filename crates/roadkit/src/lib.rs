@@ -21,6 +21,6 @@ pub mod traffic;
 pub use glb::{parse_glb, GltfAsset, GltfPrim};
 pub use library::{AssetEntry, AssetLibrary};
 pub use props::{join_along, stamp, JoinParams, PropInstance};
-pub use scene::{build_scene, render_scene, render_scene_props, PropDraw, Scene, ScenePart};
+pub use scene::{build_scene, build_scene_with_bg, render_scene, render_scene_props, PropDraw, Scene, ScenePart};
 pub use traffic_sim::{SimSettings, TrafficSim};
 pub use textures::{Texture, TextureLibrary};

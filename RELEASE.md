@@ -44,3 +44,19 @@ Build
   (build-only, no Xvfb/display in CI), artifacts on every push, GitHub Release
   with binaries on v* tags
 - 16 fresh renders at 1600 px in screenshots/ (Kijazi + Igesa)
+
+## v0.2.2
+
+- 3D viewport grid remake (the "environment" pass):
+  - adaptive spacing 10/25/50/100 m by scene radius, major line every 4th
+  - per-vertex distance fade toward the viewport backdrop — far lines melt
+    into the void instead of aliasing into dashed speckle (the CPU raster
+    has no MSAA; the old full-length uniform quads broke up into dots)
+  - origin axes tinted X-red / Z-blue like the viewport axis gizmo
+  - faint radial stage disc under the grid (rim = exact backdrop, seamless)
+    so roads no longer float in a pure void
+  - per-vertex color path in the rasterizer (ScenePart.vcolors) + explicit
+    backdrop plumbing: build_scene_with_bg / build_scene_full_with_bg so
+    the roadkit-cli (#1a1c20) and the editor (#1e222a) both get seamless fades
+- verified: egui-app --selftest ALL PASS, --uitest 246/246, new reference
+  renders screenshots/v022{editor_grid,ramps_grid,city_grid}.png
