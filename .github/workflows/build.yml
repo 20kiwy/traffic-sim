@@ -146,6 +146,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+          pattern: traffic-sim-* # exclude the github-pages artifact
           path: dist
 
       - name: Create GitHub Release
