@@ -1,5 +1,10 @@
 # traffic-sim — native builds for Linux and Windows.
 #
+# Builds ALL apps in the workspace:
+#   - yakui-app     (the yakui renderer / screenshot app)
+#   - egui-app-bin  (the egui desktop app)
+#   - roadkit-cli   (godot-road-generator RoadKit CLI)
+#
 # Build-only: NO Xvfb / no display setup here — the CI machine never runs the
 # renderer. Grab the binaries from the run's Artifacts, or from the GitHub
 # Release created automatically when a v* tag is pushed.
@@ -22,7 +27,7 @@ env:
 
 jobs:
   linux:
-    name: linux x86_64
+    name: linux x86_64 (all apps)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,17 +45,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build (release)
-        run: cargo build --release -p yakui-app -p traffic-cli
+      - name: Build all apps (release)
+        run: cargo build --release -p yakui-app -p egui-app -p roadkit-cli
 
       - name: Package
         run: |
           mkdir -p dist
           cp target/release/yakui-app dist/
-          cp target/release/traffic-cli dist/
+          cp target/release/egui-app-bin dist/
+          cp target/release/roadkit-cli dist/
           cp VERSION RELEASE.md dist/
           tar -czf traffic-sim-linux-x86_64.tar.gz -C dist .
           sha256sum traffic-sim-linux-x86_64.tar.gz > traffic-sim-linux-x86_64.tar.gz.sha256
+          tar -tzf traffic-sim-linux-x86_64.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
@@ -60,7 +67,7 @@ jobs:
             traffic-sim-linux-x86_64.tar.gz.sha256
 
   windows:
-    name: windows x86_64
+    name: windows x86_64 (all apps)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,16 +76,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build (release)
-        run: cargo build --release -p yakui-app -p traffic-cli
+      - name: Build all apps (release)
+        run: cargo build --release -p yakui-app -p egui-app -p roadkit-cli
 
       - name: Package
         shell: pwsh
         run: |
           mkdir dist
           cp target/release/yakui-app.exe dist/
-          cp target/release/traffic-cli.exe dist/
-          cp VERSION RELEASE.md dist/
+          cp target/release/egui-app-bin.exe dist/
+          cp target/release/roadkit-cli.exe dist/
+          cp VERSION dist/
+          cp RELEASE.md dist/
           Compress-Archive -Path dist/* -DestinationPath traffic-sim-windows-x86_64.zip
           (Get-FileHash traffic-sim-windows-x86_64.zip -Algorithm SHA256).Hash | Out-File -Encoding ascii traffic-sim-windows-x86_64.zip.sha256
 
