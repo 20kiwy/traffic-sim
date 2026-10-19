@@ -13,11 +13,15 @@ cargo build --release -p egui-app --target wasm32-unknown-unknown --lib
 WBV=$(cargo metadata --format-version 1 2>/dev/null | python3 -c \
   "import json,sys; print(next(p['version'] for p in json.load(sys.stdin)['packages'] if p['name']=='wasm-bindgen'))")
 WBG="/tmp/wasm-bindgen-${WBV}"
-if [ ! -x "${WBG}/wasm-bindgen" ]; then
+BIN="${WBG}/wasm-bindgen"
+if [ ! -x "${BIN}" ]; then
   curl -sL -o /tmp/wbg.tar.gz \
     "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WBV}/wasm-bindgen-${WBV}-x86_64-unknown-linux-musl.tar.gz"
   rm -rf "${WBG}" && mkdir -p "${WBG}" && tar -xzf /tmp/wbg.tar.gz -C "${WBG}"
+  # the archive wraps the binary in a platform directory
+  BIN=$(command find "${WBG}" -type f -name wasm-bindgen | head -n 1)
+  chmod +x "${BIN}"
 fi
-"${WBG}/wasm-bindgen" --target web --out-dir web-preview --out-name egui_app \
+"${BIN}" --target web --out-dir web-preview --out-name egui_app \
   target/wasm32-unknown-unknown/release/egui_app.wasm
 echo "web-preview ready (wasm-bindgen ${WBV})"
