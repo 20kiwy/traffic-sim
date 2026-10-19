@@ -68,27 +68,11 @@ impl AssetLibrary {
                         // reproduce faithfully here — remap every UV into the
                         // PLAIN asphalt column (col 7) so the tiles render as
                         // clean hand-modeled asphalt; RoadKit paints its own
-                        // zebra/stop-line markings on top. The roundabout
-                        // island gets a grass vertex tint so the ring reads.
+                        // zebra/stop-line markings on top.
                         if role.contains("junction prefab") {
-                            let def = roads::prefab::by_id(id);
-                            let island_r = def.map(|d| d.island_r).unwrap_or(0.0);
-                            for prim in &mut mesh.prims {
-                                for uv in &mut prim.uvs {
-                                    uv[0] = (0.885 + (uv[0].rem_euclid(1.0)) * 0.105).min(0.995);
-                                }
-                                if island_r > 0.0 {
-                                    for (v, c) in prim.positions.iter_mut().zip(prim.colors.iter_mut()) {
-                                        let r = (v.x * v.x + v.z * v.z).sqrt();
-                                        if v.y > -0.2 && r < (island_r * 0.98) as f32 {
-                                            // grass island (plain col ≈ 0.25 grey multiplies this)
-                                            *c = [1.9, 2.5, 1.55, 1.0];
-                                        } else {
-                                            *c = [1.55, 1.55, 1.55, 1.0];
-                                        }
-                                    }
-                                }
-                            }
+                            let island_r =
+                                roads::prefab::by_id(id).map(|d| d.island_r).unwrap_or(0.0);
+                            remap_junction_prefab(&mut mesh, island_r);
                         }
                         entries.push(AssetEntry { id: id.to_string(), name, role, mesh, thumb: None });
                     }
@@ -129,10 +113,82 @@ impl AssetLibrary {
         self.index.get(id).map(|&i| &self.entries[i])
     }
 
+    /// The whole GLB prop set embedded in the binary — the wasm32 browser
+    /// build has no filesystem, so the engine preview ships its props inside
+    /// the wasm. Mirrors `assets/glb/manifest.json` (keep in sync).
+    #[cfg(target_arch = "wasm32")]
+    pub fn embedded() -> AssetLibrary {
+        const ITEMS: &[(&str, &str, &[u8])] = &[
+            ("milestone", "route marker", include_bytes!("../../../assets/glb/milestone.glb")),
+            ("streetlight", "furniture", include_bytes!("../../../assets/glb/streetlight.glb")),
+            ("tree", "roadside vegetation", include_bytes!("../../../assets/glb/tree.glb")),
+            ("vehicle", "traffic prop", include_bytes!("../../../assets/glb/vehicle.glb")),
+            ("junctionMarker", "junction marker", include_bytes!("../../../assets/glb/junctionMarker.glb")),
+            ("trafficLightTz", "traffic signal", include_bytes!("../../../assets/glb/traffic_light_tz.glb")),
+            ("trafficLightUsa", "traffic signal", include_bytes!("../../../assets/glb/traffic_light_usa.glb")),
+            ("trafficLightEu", "traffic signal", include_bytes!("../../../assets/glb/traffic_light_eu.glb")),
+            ("signStop", "traffic sign", include_bytes!("../../../assets/glb/sign_stop.glb")),
+            ("signYield", "traffic sign", include_bytes!("../../../assets/glb/sign_yield.glb")),
+            ("signSpeed50", "traffic sign", include_bytes!("../../../assets/glb/sign_speed_50.glb")),
+            ("signSpeed80", "traffic sign", include_bytes!("../../../assets/glb/sign_speed_80.glb")),
+            ("signNoEntry", "traffic sign", include_bytes!("../../../assets/glb/sign_no_entry.glb")),
+            ("signWarning", "traffic sign", include_bytes!("../../../assets/glb/sign_warning.glb")),
+            ("signRoadName", "traffic sign", include_bytes!("../../../assets/glb/sign_road_name.glb")),
+            ("signPedestrian", "traffic sign", include_bytes!("../../../assets/glb/sign_pedestrian.glb")),
+            ("brtStation", "brt station", include_bytes!("../../../assets/glb/brt_station.glb")),
+            ("brtShelterSmall", "brt station", include_bytes!("../../../assets/glb/brt_shelter_small.glb")),
+            ("4way_1x1", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/4way_1x1.glb")),
+            ("4way_2x2", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/4way_2x2.glb")),
+            ("3way_1x1", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/3way_1x1.glb")),
+            ("3way_2x2", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/3way_2x2.glb")),
+            ("roundabout_1x1", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/roundabout_1x1.glb")),
+            ("roundabout_2x2", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/roundabout_2x2.glb")),
+            ("splitter_1x1", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/splitter_1x1.glb")),
+            ("splitter_2x2", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/splitter_2x2.glb")),
+            ("highway_onramp", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/highway_onramp.glb")),
+            ("highway_offramp", "junction prefab (WFC tile)", include_bytes!("../../../assets/glb/highway_offramp.glb")),
+        ];
+        let items: Vec<(&str, &str, &str, &[u8])> = ITEMS
+            .iter()
+            .map(|(id, role, bytes)| (*id, *id, *role, *bytes))
+            .collect();
+        let mut lib = AssetLibrary::from_bytes(&items);
+        // the same junction-prefab UV remap load_dir applies
+        for e in &mut lib.entries {
+            if e.role.contains("junction prefab") {
+                let island_r = roads::prefab::by_id(&e.id).map(|d| d.island_r).unwrap_or(0.0);
+                remap_junction_prefab(&mut e.mesh, island_r);
+            }
+        }
+        lib
+    }
+
     /// Render thumbnails for all assets with the software rasterizer.
     pub fn render_thumbs(&mut self, size: usize) {
         for e in self.entries.iter_mut() {
             e.thumb = Some(render_asset_thumbnail(&e.mesh, size));
+        }
+    }
+}
+
+/// Junction prefab tiles: remap every UV into the PLAIN asphalt column
+/// (col 7) so the tiles render as clean hand-modeled asphalt; the
+/// roundabout island gets a grass vertex tint so the ring reads.
+fn remap_junction_prefab(mesh: &mut GltfAsset, island_r: f64) {
+    for prim in &mut mesh.prims {
+        for uv in &mut prim.uvs {
+            uv[0] = (0.885 + (uv[0].rem_euclid(1.0)) * 0.105).min(0.995);
+        }
+        if island_r > 0.0 {
+            for (v, c) in prim.positions.iter_mut().zip(prim.colors.iter_mut()) {
+                let r = (v.x * v.x + v.z * v.z).sqrt();
+                if v.y > -0.2 && r < (island_r * 0.98) as f32 {
+                    // grass island (plain col ≈ 0.25 grey multiplies this)
+                    *c = [1.9, 2.5, 1.55, 1.0];
+                } else {
+                    *c = [1.55, 1.55, 1.55, 1.0];
+                }
+            }
         }
     }
 }

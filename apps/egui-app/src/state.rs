@@ -347,6 +347,11 @@ impl RoadkitApp {
     pub fn core(cfg: LaunchConfig) -> Self {
         let assets_dir = find_assets_dir();
         let schema = NodeSchema::load(&assets_dir);
+        // browser (wasm32) builds have no filesystem: the props + textures
+        // ship embedded in the wasm (roadkit::library::AssetLibrary::embedded)
+        #[cfg(target_arch = "wasm32")]
+        let mut assets = AssetLibrary::embedded();
+        #[cfg(not(target_arch = "wasm32"))]
         let mut assets = AssetLibrary::load_dir(&assets_dir);
         if assets.entries.is_empty() {
             eprintln!("[roadkit] no GLB assets found under {:?}", assets_dir);
@@ -360,6 +365,9 @@ impl RoadkitApp {
         }
 
         let scene: SharedScene = Rc::new(RefCell::new(SceneState::default()));
+        #[cfg(target_arch = "wasm32")]
+        let textures = TextureLibrary::load_embedded();
+        #[cfg(not(target_arch = "wasm32"))]
         let textures = TextureLibrary::load_dir(&assets_dir.join("textures"));
         let mut app = Self {
             scene,

@@ -20,12 +20,12 @@ pub struct Texture {
 }
 
 impl Texture {
-    pub fn load_rktx(path: &Path) -> std::io::Result<Self> {
-        let bytes = std::fs::read(path)?;
+    /// Parse an in-memory RKTX payload (magic 'RKTX' + u16 w + u16 h + rgba8).
+    pub fn from_rktx_bytes(bytes: &[u8]) -> std::io::Result<Self> {
         if bytes.len() < 8 || &bytes[0..4] != b"RKTX" {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("{}: not an RKTX texture", path.display()),
+                "not an RKTX texture".to_string(),
             ));
         }
         let w = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
@@ -34,10 +34,17 @@ impl Texture {
         if bytes.len() < 8 + need {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("{}: truncated (need {need} bytes)", path.display()),
+                format!("truncated RKTX (need {need} bytes)"),
             ));
         }
         Ok(Self { w, h, data: bytes[8..8 + need].to_vec() })
+    }
+
+    pub fn load_rktx(path: &Path) -> std::io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        Self::from_rktx_bytes(&bytes).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("{}: {}", path.display(), e))
+        })
     }
 
     /// Bilinear RGBA sample with wrapped UVs (0..1, repeat).
@@ -124,6 +131,39 @@ impl TextureLibrary {
             return None;
         }
         self.entries.get(slot as usize)
+    }
+
+    /// The standard texture set embedded in the binary (the wasm32 browser
+    /// build has no filesystem). Names + order MUST match `load_dir` so the
+    /// road mesh texture slots stay valid.
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_embedded() -> Self {
+        const NAMES: [&str; 9] = [
+            "road_trim", "grass", "sidewalk", "median", "asphalt",
+            "cement", "mud", "rough", "red_tactile",
+        ];
+        const BYTES: [&[u8]; 9] = [
+            include_bytes!("../../../assets/textures/road_trim.raw"),
+            include_bytes!("../../../assets/textures/grass.raw"),
+            include_bytes!("../../../assets/textures/sidewalk.raw"),
+            include_bytes!("../../../assets/textures/median.raw"),
+            include_bytes!("../../../assets/textures/asphalt.raw"),
+            include_bytes!("../../../assets/textures/cement.raw"),
+            include_bytes!("../../../assets/textures/mud.raw"),
+            include_bytes!("../../../assets/textures/rough.raw"),
+            include_bytes!("../../../assets/textures/red_tactile.raw"),
+        ];
+        let mut lib = Self::default();
+        for (name, bytes) in NAMES.iter().zip(BYTES.iter()) {
+            lib.index.insert(name.to_string(), lib.entries.len());
+            match Texture::from_rktx_bytes(bytes) {
+                Ok(t) => lib.entries.push(t),
+                Err(_) => lib
+                    .entries
+                    .push(Texture { w: 1, h: 1, data: vec![128, 128, 128, 255] }),
+            }
+        }
+        lib
     }
 
     /// Number of texture slots (loaded + fallbacks), for the UI.
