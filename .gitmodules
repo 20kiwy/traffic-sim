@@ -10,3 +10,6 @@
 [submodule "_sources/egregoria"]
 	path = _sources/egregoria
 	url = https://github.com/uriopass/egregoria.git
+[submodule "_sources/TerraZone"]
+	path = _sources/TerraZone
+	url = https://github.com/20kiwy/TerraZone.git

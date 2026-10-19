@@ -84,7 +84,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     app.cam.yaw = 0.65;
                 }
                 ui.separator();
-                ui.toggle_value(&mut app.render.show_grid, "grid").on_hover_text("Show the reference ground grid over the engine terrain environment");
+                ui.toggle_value(&mut app.render.show_grid, "grid").on_hover_text("Show the TerraZone ground grid — clean screen-space reference lines hugging the engine terrain");
                 ui.toggle_value(&mut app.render.show_props, "props").on_hover_text("Show GLB props");
                 ui.toggle_value(&mut app.render.show_lanes, "lanes").on_hover_text("Show the generated AI RoadLanes (GRG draw_lanes)");
                 ui.toggle_value(&mut app.render.spin, "spin").on_hover_text("Auto-orbit the camera");
@@ -215,6 +215,11 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
+
+            // ---- TerraZone ground grid (screen-space reference lines) ----
+            if app.render.show_grid {
+                draw_ground_grid(app, ui, rect, &scene);
+            }
 
             // ---- interaction ----
             let shift = ctx.input(|i| i.modifiers.shift);
@@ -501,5 +506,192 @@ fn draw_axis_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, respon
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TerraZone ground grid (ported from TerraZone crates/ui-egui view3d.rs)
+// ---------------------------------------------------------------------------
+
+/// The ground grid's line spacing for the camera's distance: a 1-2-5×10ⁿ
+/// metre ladder aiming at about four cells across the visible half-width,
+/// so any dolly keeps a legible ladder. (TerraZone `grid_spacing`; the
+/// viewport's fixed fov_y is 0.9 rad, as in `OrbitCam::proj`.)
+fn grid_spacing(dist: f32) -> f32 {
+    let raw = 2.0 * dist * 0.9f32.tan().max(0.01) / 4.0;
+    let pow = 10.0f32.powf(raw.max(1e-3).log10().floor());
+    let m = raw / pow;
+    if m < 1.5 {
+        pow
+    } else if m < 3.5 {
+        2.0 * pow
+    } else if m < 7.5 {
+        5.0 * pow
+    } else {
+        10.0 * pow
+    }
+}
+
+/// The X/Z ground grid over the rendered engine terrain — TerraZone's
+/// `draw_ground_grid` copied in: screen-space metre lines around the camera
+/// target on the ground, the two centre lines stronger. Thin faint painter
+/// strokes through the SAME view/projection as the CPU raster, so the lines
+/// hug the heightfield, never alias, never z-fight and never blob at the
+/// crossings.
+/// The X/Z ground grid over the rendered engine terrain — TerraZone's
+/// `draw_ground_grid` copied in: screen-space metre lines, thin and faint,
+/// with the two centre lines stronger. Through the SAME view/projection as
+/// the CPU raster so the lines hug the heightfield, never alias, never
+/// z-fight and never blob at the crossings. Anchored at the scene centre
+/// and clipped to the ground's own reach (grass fan = disc, terrain =
+/// square) so lines never float off the ground onto the sky haze.
+fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &roadkit::Scene) {
+    let cam = &app.cam;
+    let (w, h) = (rect.width(), rect.height());
+    let view = cam.view();
+    let proj = cam.proj(w / h);
+    // world (scene-local) -> screen, exactly the raster's projection; also
+    // returns the view depth (-z) for the distance-fog fade
+    let xform = |p: [f32; 3]| -> Option<(egui::Pos2, f32)> {
+        let v = view.transform_point(Vec3::new(p[0], p[1], p[2])).0;
+        if v.z >= -0.05 {
+            return None; // behind / on the near plane
+        }
+        let iw = -1.0 / v.z;
+        let ndc_x = v.x * iw * proj.m[0];
+        let ndc_y = v.y * iw * proj.m[5];
+        Some((
+            egui::Pos2::new(
+                rect.min.x + (ndc_x * 0.5 + 0.5) * w,
+                rect.min.y + (1.0 - (ndc_y * 0.5 + 0.5)) * h,
+            ),
+            -v.z,
+        ))
+    };
+    // the raster's exact distance fog (draw_all): content fades to the haze
+    // between these two camera depths — the lines must ride the SAME fade
+    // or they float over fully-fogged ground
+    let fog_start = cam.dist + scene.radius_m * 0.55;
+    let fog_end = cam.dist + scene.radius_m * 3.4;
+
+    let target = cam.target;
+    let s = grid_spacing(cam.dist);
+    let e = scene.ground_extent;
+    // flat ground = the radial grass fan (disc); terrain = the square
+    // heightfield — each mode clips its lines to its own shape
+    let disc = scene.sampler.is_none();
+    let lift = 0.03f32;
+    let height = |x: f32, z: f32| -> f32 {
+        scene
+            .sampler
+            .as_ref()
+            .map(|g| g.height(x, z))
+            .unwrap_or(0.0)
+            + lift
+    };
+    // the lines must end BEFORE the ground melts into the sky haze — an
+    // alpha-faded black line still contrasts against the near-sky ground,
+    // so the strength is cut to zero while the ground is still clearly
+    // green (the fan melts from 72%, the Chebyshev heightfield from 35%)
+    let (rim_a, rim_b) = if disc { (0.55f32, 0.70f32) } else { (0.32f32, 0.55f32) };
+    let fade = |x: f32, z: f32| -> f32 {
+        let t = if disc {
+            (x * x + z * z).sqrt() / e
+        } else {
+            (x.abs() / e).max(z.abs() / e)
+        };
+        let u = ((t - rim_a) / (rim_b - rim_a).max(1e-5)).clamp(0.0, 1.0);
+        1.0 - u * u * (3.0 - 2.0 * u)
+    };
+
+    if std::env::var("RK_GRID_DEBUG").is_ok() {
+        eprintln!("[grid] e={e:.0} disc={disc} s={s:.1} dist={:.1} target=({:.1},{:.1},{:.1}) radius={:.0} fog=({fog_start:.0},{fog_end:.0})",
+            cam.dist, target.x, target.y, target.z, scene.radius_m);
+    }
+    let painter = ui.painter();
+    // one ground-hugging polyline from (ax, az) to (bx, bz) inside the
+    // ground shape; runs break at the near plane. `base` = the line's
+    // alpha at the centre (melted out toward the rim)
+    let ground_line = |ax: f32,
+                       az: f32,
+                       bx: f32,
+                       bz: f32,
+                       width: f32,
+                       base: u8| {
+        let span = (bx - ax).abs().max((bz - az).abs());
+        let steps = ((span / s).ceil() as usize).clamp(1, 96);
+        let mut prev: Option<egui::Pos2> = None;
+        for k in 0..=steps {
+            let t = k as f32 / steps as f32;
+            let (x, z) = (ax + (bx - ax) * t, az + (bz - az) * t);
+            if let Some((p, depth)) = xform([x, height(x, z), z]) {
+                let fog = ((depth - fog_start) / (fog_end - fog_start)).clamp(0.0, 1.0);
+                let a = base as f32 * fade(x, z) * (1.0 - fog);
+                if a < 4.0 {
+                    prev = None;
+                    continue;
+                }
+                if let Some(q) = prev {
+                    painter.line_segment(
+                        [q, p],
+                        egui::Stroke::new(width, egui::Color32::from_black_alpha(a as u8)),
+                    );
+                }
+                prev = Some(p);
+            } else {
+                prev = None;
+            }
+        }
+    };
+    // only lines near the view (TerraZone's 28-cell window), anchored at
+    // the scene centre like TerraZone anchors at the scene's position
+    const VIEW_CELLS: f32 = 28.0;
+    let line_lo = |t: f32| ((t - VIEW_CELLS * s) / s).floor() as i32;
+    let line_hi = |t: f32| ((t + VIEW_CELLS * s) / s).ceil() as i32;
+
+    for i in line_lo(target.x)..=line_hi(target.x) {
+        let x = i as f32 * s;
+        // clip this line's z range to the ground shape
+        let (zmin, zmax) = if disc {
+            let r2 = e * e - x * x;
+            if r2 <= 0.0 {
+                continue;
+            }
+            let r = r2.sqrt();
+            (-r, r)
+        } else {
+            (-e, e)
+        };
+        let (za, zb) = (
+            (zmin.max(line_lo(target.z) as f32 * s)).min(zmax),
+            (zmax.min(line_hi(target.z) as f32 * s)).max(zmin),
+        );
+        if za >= zb {
+            continue;
+        }
+        let (width, base) = if i == 0 { (1.4, 100u8) } else { (1.0, 44u8) };
+        ground_line(x, za, x, zb, width, base);
+    }
+    for i in line_lo(target.z)..=line_hi(target.z) {
+        let z = i as f32 * s;
+        let (xmin, xmax) = if disc {
+            let r2 = e * e - z * z;
+            if r2 <= 0.0 {
+                continue;
+            }
+            let r = r2.sqrt();
+            (-r, r)
+        } else {
+            (-e, e)
+        };
+        let (xa, xb) = (
+            (xmin.max(line_lo(target.x) as f32 * s)).min(xmax),
+            (xmax.min(line_hi(target.x) as f32 * s)).max(xmin),
+        );
+        if xa >= xb {
+            continue;
+        }
+        let (width, base) = if i == 0 { (1.4, 100u8) } else { (1.0, 44u8) };
+        ground_line(xa, z, xb, z, width, base);
     }
 }

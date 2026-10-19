@@ -50,9 +50,15 @@ pub struct SceneStats {
 pub struct Scene {
     pub parts: Vec<ScenePart>,
     pub props: Vec<PropDraw>,
-    /// ground plane + grid
+    /// ground plane (grass fan / terrain heightfield)
     pub ground: Vec<ScenePart>,
     pub radius_m: f32,
+    /// meters: the ground's reach from the origin (heightfield 1.2r when
+    /// the terrain connector rides along, grass fan 1.6r flat) — viewport
+    /// reference lines never float past it
+    pub ground_extent: f32,
+    /// ground height sampler for overlays (None → flat 0-height ground)
+    pub sampler: Option<GroundSampler>,
     pub stats: SceneStats,
 }
 
@@ -320,19 +326,26 @@ pub fn build_scene_full_with_bg(
         ground.push(disc);
     }
 
+    // The reference grid is NOT baked into the scene anymore: it is drawn
+    // as a screen-space overlay by the viewport (the TerraZone look — thin
+    // faint metre lines that never alias or blob). The scene only carries
+    // the ground extent + height sampler the overlay needs.
+    let _ = show_grid;
     let terrain_on = terrain.map(|t| t.enabled).unwrap_or(false);
+    let ground_extent = if terrain_on { radius * 1.2 } else { radius * 1.6 };
+    let mut sampler: Option<GroundSampler> = None;
     if terrain_on {
         let t = terrain.unwrap();
         let flatten = TerrainFlatten::new(t, curves);
         build_terrain_ground(&mut ground, t, &flatten, radius, cx, cz, &mut tris, backdrop);
-        if show_grid {
-            build_grid(&mut ground, radius, cx, cz, &mut tris, Some((t, &flatten)), backdrop);
-        }
+        sampler = Some(GroundSampler {
+            flatten,
+            t: terrain.cloned(),
+            cx,
+            cz,
+        });
     } else {
         build_flat_grass(&mut ground, radius, &mut tris, backdrop);
-        if show_grid {
-            build_grid(&mut ground, radius, cx, cz, &mut tris, None, backdrop);
-        }
     }
 
     let prop_count = prop_draws.len();
@@ -341,6 +354,8 @@ pub fn build_scene_full_with_bg(
         props: prop_draws,
         ground,
         radius_m: radius,
+        ground_extent,
+        sampler,
         stats: SceneStats {
             curves: curves.len(),
             points: total_points,
@@ -439,6 +454,7 @@ fn append_lane_fins(
 
 /// One flattened road sample: planar position, road-surface elevation
 /// (per-point `elev` interpolation) + half paved width.
+#[derive(Clone)]
 struct RoadSample {
     x: f64,
     z: f64,
@@ -449,6 +465,7 @@ struct RoadSample {
 /// Shared flatten context: road samples (8 m density, per-curve + per-point
 /// `flatten_terrain` respected) in a spatial hash + the eased height query.
 /// Built ONCE per scene build, used by both the heightfield and the grid.
+#[derive(Clone)]
 struct TerrainFlatten {
     samples: Vec<RoadSample>,
     cell: f64,
@@ -543,6 +560,28 @@ impl TerrainFlatten {
             let tt = 1.0 - u;
             let eased = tt * tt * (3.0 - 2.0 * tt);
             hill + (ry + t.offset - hill) * eased
+        }
+    }
+}
+
+/// Scene-local ground height sampler carried on the built [`Scene`] so
+/// viewport overlays (the TerraZone-style ground grid) can hug the SAME
+/// surface the heightfield rendered: hills snapped to road elevations.
+#[derive(Clone)]
+pub struct GroundSampler {
+    flatten: TerrainFlatten,
+    t: Option<roads::terrain::TerrainState>,
+    cx: f32,
+    cz: f32,
+}
+
+impl GroundSampler {
+    /// Scene-local `(x, z)` (the space all scene mesh positions live in)
+    /// → ground height in meters (y up), roads flattened in.
+    pub fn height(&self, x: f32, z: f32) -> f32 {
+        match &self.t {
+            Some(t) => self.flatten.height(t, (x + self.cx) as f64, (z + self.cz) as f64) as f32,
+            None => 0.0,
         }
     }
 }
@@ -701,164 +740,6 @@ fn up_shade() -> f32 {
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a).max(1e-5)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-/// Editor-grade reference ground grid over the engine terrain environment:
-/// - adaptive spacing (10 / 25 / 50 / 100 m by scene radius), major line
-///   every 4th minor
-/// - origin axes tinted X-red / Z-blue like the viewport axis gizmo
-/// - bright clear lines that melt into the grass they sit on via per-vertex
-///   colors (the CPU raster has no MSAA — sub-pixel quads break into
-///   dashes, so far segments fade before they can alias)
-/// - with terrain the lines follow the heightfield; flat 3 cm above the
-///   grass plane otherwise
-fn build_grid(
-    ground: &mut Vec<ScenePart>,
-    radius: f32,
-    cx: f32,
-    cz: f32,
-    tris: &mut usize,
-    flatten: Option<(&roads::terrain::TerrainState, &TerrainFlatten)>,
-    horizon: [f32; 3],
-) {
-    let spacing = if radius <= 120.0 {
-        10.0
-    } else if radius <= 300.0 {
-        25.0
-    } else if radius <= 800.0 {
-        50.0
-    } else {
-        100.0
-    };
-    let major_every = 4i64;
-    // grid extent matches the GROUND extent exactly (heightfield 1.2r when
-    // terrain rides along, grass fan 1.6r flat) — lines never float past it
-    let ground_extent = if flatten.is_some() { radius * 1.2 } else { radius * 1.6 };
-    let n = (ground_extent / spacing).floor().max(2.0) as i64;
-    let extent = n as f32 * spacing;
-
-    // the fade target replicates the ground's own rim melt (grass -> haze),
-    // so line ends land exactly on the ground color at every distance.
-    // distance shape matches the ground mesh: radial for the flat grass fan,
-    // Chebyshev (square) for the terrain heightfield square
-    let inv = 1.0 / up_shade();
-    let rim = [horizon[0] * inv, horizon[1] * inv, horizon[2] * inv];
-    let rim_from = if flatten.is_some() { 0.72f32 } else { 0.35f32 };
-    let radial = flatten.is_none();
-    let ground_col = move |x: f32, z: f32| -> [f32; 3] {
-        let t = if radial {
-            (x * x + z * z).sqrt() / ground_extent
-        } else {
-            (x.abs() / ground_extent).max(z.abs() / ground_extent)
-        };
-        let f = smoothstep(rim_from, 1.0, t);
-        [
-            GRASS_BASE[0] + (rim[0] - GRASS_BASE[0]) * f,
-            GRASS_BASE[1] + (rim[1] - GRASS_BASE[1]) * f,
-            GRASS_BASE[2] + (rim[2] - GRASS_BASE[2]) * f,
-        ]
-    };
-
-    // line classes: (color, half width, fade start, fade end) — fade radii
-    // in meters from the origin; everything melts into the grass by the edge
-    let minor = ([0.82, 0.86, 0.74], 0.10, extent * 0.55, extent * 1.00);
-    let major = ([0.94, 0.96, 0.86], 0.26, extent * 0.62, extent * 1.00);
-    let axis_x = ([0.85, 0.26, 0.22], 0.38, extent * 0.70, extent * 1.00);
-    let axis_z = ([0.25, 0.45, 0.86], 0.38, extent * 0.70, extent * 1.00);
-    let classes = [minor, major, axis_x, axis_z];
-    let mut parts: Vec<ScenePart> = classes
-        .iter()
-        .map(|(c, ..)| ScenePart {
-            positions: vec![],
-            indices: vec![],
-            color: [c[0], c[1], c[2], 1.0],
-            vcolors: vec![],
-            uv: vec![],
-            tex: -1,
-        })
-        .collect();
-
-    // per-vertex color at a line vertex: line color -> local ground color
-    // (which itself fades to the rim haze) by distance from the origin
-    let vcol = |x: f32, z: f32, cls: usize| -> [f32; 4] {
-        let (c, _, fs, fe) = classes[cls];
-        let d = (x * x + z * z).sqrt();
-        let f = 1.0 - smoothstep(fs, fe, d);
-        let g = ground_col(x, z);
-        [
-            g[0] + (c[0] - g[0]) * f,
-            g[1] + (c[1] - g[1]) * f,
-            g[2] + (c[2] - g[2]) * f,
-            1.0,
-        ]
-    };
-
-    // one segment quad (a -> b) with per-vertex colors at the two ends
-    let seg = |p: &mut ScenePart, a: Vec3, b: Vec3, ca: [f32; 4], cb: [f32; 4], hw: f32| {
-        let dir = (b - a).normalized();
-        let side = Vec3::new(-dir.z, 0.0, dir.x) * hw;
-        let base = p.positions.len() as u32;
-        p.positions.push(a - side);
-        p.positions.push(a + side);
-        p.positions.push(b - side);
-        p.positions.push(b + side);
-        p.vcolors.extend_from_slice(&[ca, ca, cb, cb]);
-        p.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
-    };
-
-    // height of a grid vertex (terrain-following or 3 cm over the grass)
-    let height = |x: f32, z: f32| -> f32 {
-        match flatten {
-            Some((t, fl)) => fl.height(t, (x + cx) as f64, (z + cz) as f64) as f32 + 0.03,
-            None => -0.01,
-        }
-    };
-
-    // lines at i * spacing; i == 0 -> origin axis, i % 4 == 0 -> major
-    for i in -n..=n {
-        let k = i as f32 * spacing;
-        // class index per direction: fixed-x lines (varying z) carry the Z
-        // axis tint (classes[3]), fixed-z lines (varying x) the X axis tint
-        // (classes[2]); i % 4 == 0 -> major (1), else minor (0)
-        let (cls_z, cls_x) = if i == 0 {
-            (3usize, 2usize)
-        } else if i % major_every == 0 {
-            (1usize, 1usize)
-        } else {
-            (0usize, 0usize)
-        };
-        let mut s0 = -extent;
-        while s0 < extent {
-            let s1 = (s0 + spacing).min(extent);
-            // line along z (fixed x = k): the Z-axis class tint
-            {
-                let p = &mut parts[cls_z];
-                let hw = classes[cls_z].1;
-                let a = Vec3::new(k, height(k, s0), s0);
-                let b = Vec3::new(k, height(k, s1), s1);
-                seg(p, a, b, vcol(k, s0, cls_z), vcol(k, s1, cls_z), hw);
-            }
-            // line along x (fixed z = k): the X-axis class tint
-            {
-                let p = &mut parts[cls_x];
-                let hw = classes[cls_x].1;
-                let a = Vec3::new(s0, height(s0, k), k);
-                let b = Vec3::new(s1, height(s1, k), k);
-                seg(p, a, b, vcol(s0, k, cls_x), vcol(s1, k, cls_x), hw);
-            }
-            if s1 >= extent {
-                break;
-            }
-            s0 = s1;
-        }
-    }
-    for p in parts {
-        *tris += p.indices.len() / 3;
-        if !p.indices.is_empty() {
-            ground.push(p);
-        }
-    }
 }
 
 /// Flat engine-terrain ground (terrain connector OFF): a soft grass fan
