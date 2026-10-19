@@ -14,12 +14,12 @@ use eframe::wasm_bindgen::{self, prelude::*};
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub async fn start(canvas_id: String) -> Result<(), wasm_bindgen::JsValue> {
-    console_error_panic_hook::init_once();
+    console_error_panic_hook::set_once();
     let cfg = LaunchConfig::default();
     let web_options = eframe::WebOptions::default();
     eframe::WebRunner::new()
         .start(
-            canvas_id,
+            &canvas_id,
             web_options,
             Box::new(move |cc| Ok(Box::new(RoadkitApp::with_config(cc, cfg.clone())))),
         )

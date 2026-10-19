@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RoadKit Godot — WASM engine preview</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #16181d; overflow: hidden; }
+  #roadkit-canvas { width: 100%; height: 100%; display: block; outline: none; touch-action: none; }
+  #boot {
+    position: fixed; inset: 0; display: flex; flex-direction: column; gap: 10px;
+    align-items: center; justify-content: center; color: #9aa3ad;
+    font: 13px/1.7 ui-monospace, Menlo, Consolas, monospace; text-align: center;
+    z-index: 1; pointer-events: none;
+  }
+  #boot .bar { width: 220px; height: 3px; background: #262a32; border-radius: 2px; overflow: hidden; }
+  #boot .bar i { display: block; height: 100%; width: 40%; background: #f06a52; border-radius: 2px;
+                 animation: slide 1.1s ease-in-out infinite alternate; }
+  @keyframes slide { from { margin-left: 0; } to { margin-left: 60%; } }
+  #boot.err { color: #f06a52; pointer-events: auto; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="boot">
+  <div>loading roadkit engine (wasm 3.8 MB)</div>
+  <div class="bar"><i></i></div>
+  <div>the SAME editor as the native build — WebGL2 via glow</div>
+</div>
+<canvas id="roadkit-canvas" tabindex="-1"></canvas>
+<script type="module">
+  const boot = document.getElementById('boot');
+  try {
+    const mod = await import('./egui_app.js');
+    await mod.default();                    // init(): fetch + instantiate egui_app_bg.wasm
+    await mod.start('roadkit-canvas');      // boot eframe on the canvas
+    boot.remove();
+  } catch (e) {
+    boot.classList.add('err');
+    boot.textContent = 'failed to start: ' + (e && (e.message || e.toString()));
+    console.error(e);
+  }
+</script>
+</body>
+</html>

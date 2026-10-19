@@ -1,9 +1,12 @@
-# traffic-sim — native builds for Linux and Windows.
+# traffic-sim — native builds for Linux and Windows + the WASM web preview.
 #
 # Builds ALL apps in the workspace:
 #   - yakui-app     (the yakui renderer / screenshot app)
 #   - egui-app-bin  (the egui desktop app)
 #   - roadkit-cli   (godot-road-generator RoadKit CLI)
+# and deploys the browser engine preview (egui-app compiled to wasm32,
+# eframe WebRunner + glow WebGL2) to GitHub Pages:
+#   https://20kiwy.github.io/traffic-sim/
 #
 # Build-only: NO Xvfb / no display setup here — the CI machine never runs the
 # renderer. Grab the binaries from the run's Artifacts, or from the GitHub
@@ -98,10 +101,46 @@ jobs:
             traffic-sim-windows-x86_64.zip
             traffic-sim-windows-x86_64.zip.sha256
 
+  web:
+    name: wasm engine preview (pages)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build wasm + glue (web-preview/build-web.sh)
+        run: ./web-preview/build-web.sh
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web-preview
+
+  deploy-pages:
+    name: deploy preview to GitHub Pages
+    if: github.ref == 'refs/heads/main'
+    needs: [web]
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
   release:
     name: release (v* tags)
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    needs: [linux, windows, web]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

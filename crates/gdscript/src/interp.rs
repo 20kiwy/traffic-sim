@@ -39,8 +39,8 @@ impl Default for Interpreter {
 
 impl Interpreter {
     pub fn new() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let seed = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
             .unwrap_or(0x9E3779B97F4A7C15)
             | 1;

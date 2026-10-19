@@ -742,6 +742,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -933,7 +943,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "web-time",
+ "web-time 0.2.4",
  "winapi",
  "winit",
 ]
@@ -956,6 +966,7 @@ dependencies = [
 name = "egui-app"
 version = "0.4.0"
 dependencies = [
+ "console_error_panic_hook",
  "eframe",
  "egui",
  "egui-kit",
@@ -965,6 +976,9 @@ dependencies = [
  "roadkit",
  "roads",
  "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time 1.1.0",
 ]
 
 [[package]]
@@ -988,7 +1002,7 @@ dependencies = [
  "log",
  "thiserror 1.0.69",
  "type-map",
- "web-time",
+ "web-time 0.2.4",
  "wgpu",
  "winit",
 ]
@@ -1006,7 +1020,7 @@ dependencies = [
  "log",
  "raw-window-handle 0.6.2",
  "smithay-clipboard",
- "web-time",
+ "web-time 0.2.4",
  "webbrowser",
  "winit",
 ]
@@ -1298,6 +1312,9 @@ version = "0.4.0"
 [[package]]
 name = "gdscript"
 version = "0.4.0"
+dependencies = [
+ "web-time 1.1.0",
+]
 
 [[package]]
 name = "generic-array"
@@ -3587,6 +3604,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "webbrowser"
 version = "1.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4056,7 +4083,7 @@ dependencies = [
  "wayland-protocols 0.31.2",
  "wayland-protocols-plasma",
  "web-sys",
- "web-time",
+ "web-time 0.2.4",
  "windows-sys 0.48.0",
  "x11-dl",
  "x11rb",

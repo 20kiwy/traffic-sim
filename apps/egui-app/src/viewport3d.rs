@@ -182,7 +182,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             if cache_hit {
                 rgba = Vec::new();
             } else {
-                let t0 = std::time::Instant::now();
+                let t0 = web_time::Instant::now();
                 let target = if app.render.show_props {
                     &scene
                 } else {
