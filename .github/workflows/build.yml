@@ -1,0 +1,107 @@
+# traffic-sim — native builds for Linux and Windows.
+#
+# Build-only: NO Xvfb / no display setup here — the CI machine never runs the
+# renderer. Grab the binaries from the run's Artifacts, or from the GitHub
+# Release created automatically when a v* tag is pushed.
+#
+# The repo is PUBLIC, so GitHub Actions minutes are free (standard runners).
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed for the release job
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (no Xvfb — build only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libwayland-dev libgl1-mesa-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release -p yakui-app -p traffic-cli
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/yakui-app dist/
+          cp target/release/traffic-cli dist/
+          cp VERSION RELEASE.md dist/
+          tar -czf traffic-sim-linux-x86_64.tar.gz -C dist .
+          sha256sum traffic-sim-linux-x86_64.tar.gz > traffic-sim-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: traffic-sim-linux-x86_64
+          path: |
+            traffic-sim-linux-x86_64.tar.gz
+            traffic-sim-linux-x86_64.tar.gz.sha256
+
+  windows:
+    name: windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release -p yakui-app -p traffic-cli
+
+      - name: Package
+        shell: pwsh
+        run: |
+          mkdir dist
+          cp target/release/yakui-app.exe dist/
+          cp target/release/traffic-cli.exe dist/
+          cp VERSION RELEASE.md dist/
+          Compress-Archive -Path dist/* -DestinationPath traffic-sim-windows-x86_64.zip
+          (Get-FileHash traffic-sim-windows-x86_64.zip -Algorithm SHA256).Hash | Out-File -Encoding ascii traffic-sim-windows-x86_64.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: traffic-sim-windows-x86_64
+          path: |
+            traffic-sim-windows-x86_64.zip
+            traffic-sim-windows-x86_64.zip.sha256
+
+  release:
+    name: release (v* tags)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

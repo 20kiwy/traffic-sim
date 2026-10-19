@@ -24,3 +24,23 @@ Build
 -----
   cargo check --workspace   # engine crate needs vulkan dev libs (see /home/z/work/env.sh)
   cargo run -p yakui-app -- --data kijazi --shots 3
+
+## v0.2.1
+
+- Real-world detail pass on the native bridge system (zoomed cameras):
+  on-deck drone + low-hover shots along the span, under-deck views standing on
+  the lower intersection, pier close-ups, wide context — cameras derived from
+  the longest bridge's own geometry (deck centroid, exact deck_y, farthest-pair
+  span axis, ground-aware eye heights clamped to the clearance envelope)
+- Crisp deck paint: solid white edge lines + geometric dashed lane lines
+  (1.6 m on / 3.2 m period) on both carriageways; BRT median decks get
+  per-carriageway dashes (BridgeSpec.median_m)
+- Real-world sky: gradient above the horizon replaces the flat clear color
+  (background pixels only — geometry reaching above the horizon is preserved);
+  haze-colored clear fills voids beyond the terrain square
+- tsdata assets_data_dir(): TRAFFIC_SIM_ASSETS env override + CWD fallback so
+  prebuilt release binaries find the asset tree anywhere
+- CI: .github/workflows/build.yml — release builds for Linux + Windows
+  (build-only, no Xvfb/display in CI), artifacts on every push, GitHub Release
+  with binaries on v* tags
+- 16 fresh renders at 1600 px in screenshots/ (Kijazi + Igesa)

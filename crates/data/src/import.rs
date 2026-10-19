@@ -291,9 +291,21 @@ pub fn merge_docs(docs: &[Value]) -> Value {
     serde_json::json!({ "elements": elements })
 }
 
-/// Absolute path of the workspace `assets/data` directory (resolved from
-/// this crate's manifest: `crates/data` → `../../assets/data`).
+/// Path of the workspace `assets/data` directory. Resolution order:
+/// 1. `TRAFFIC_SIM_ASSETS` env var (points at the `assets` root — for
+///    prebuilt binaries downloaded from GitHub Releases),
+/// 2. `./assets/data` relative to the CWD (repo-checkout runs),
+/// 3. this crate's compile-time manifest path (in-tree builds).
 pub fn assets_data_dir() -> PathBuf {
+    if let Ok(root) = std::env::var("TRAFFIC_SIM_ASSETS") {
+        if !root.trim().is_empty() {
+            return PathBuf::from(root).join("data");
+        }
+    }
+    let cwd = PathBuf::from("assets/data");
+    if cwd.is_dir() {
+        return cwd;
+    }
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/data");
     p.canonicalize().unwrap_or(p)
 }

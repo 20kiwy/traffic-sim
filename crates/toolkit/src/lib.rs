@@ -186,27 +186,80 @@ pub fn hero_shots(curves: &[RoadCurve], count: usize, prefix: &str) -> Vec<Camer
         .collect()
 }
 
-/// Close-up shots focused on one point (e.g. the Kijazi flyover deck and the
-/// intersection below it).
-pub fn focus_shots(curves: &[RoadCurve], focus: [f64; 2], prefix: &str) -> Vec<CameraShot> {
+/// Close-up shots focused on one bridge — real-world detail pass.
+///
+/// `focus` = deck centroid `[x, y, z]` (y = exact deck height), `ground_y` =
+/// terrain height under the span (deck_y − clearance), `axis` = along-deck
+/// unit direction `[x, z]`. Produces a drone pass over the deck (markings,
+/// gutters, railings), a low hover over the surface, under-deck views of
+/// piers + clearance + the intersection below, a pier close-up and a wide
+/// context frame. Under-deck cameras are clamped to stand ON the ground
+/// under the span (Kijazi clearance is only ~5 m — no room below).
+pub fn focus_shots(
+    curves: &[RoadCurve],
+    focus: [f64; 3],
+    ground_y: f64,
+    axis: [f64; 2],
+    prefix: &str,
+) -> Vec<CameraShot> {
     let bb = curves_bbox(curves);
     let span = (bb.2 - bb.0).max(bb.3 - bb.1).max(60.0);
-    let mut shots = Vec::new();
-    for (i, (d, p, name)) in [
-        ((span * 0.06).clamp(60.0, 420.0), 0.40, "deck"),
-        ((span * 0.10).clamp(90.0, 600.0), 0.70, "below"),
-        ((span * 0.30).clamp(220.0, 1500.0), 0.5, "wide"),
+    let deck_y = focus[1].max(2.0);
+    let (ax, az) = (axis[0], axis[1]);
+    // yaw that places the camera down-axis so the view direction runs ALONG
+    // the deck: view dir = -(cy, sy) * dist -> (cy, sy) = (-ax, -az)
+    let yaw_along = (-ax).atan2(-az);
+    let (fx, fz) = (focus[0], focus[2]);
+    let ahead = |t: f64| [fx + ax * 26.0 * t, fz + az * 26.0 * t];
+    let a1 = ahead(0.75);
+    let a2 = ahead(0.4);
+    let a3 = ahead(0.3);
+    // eye height that looks slightly UP at the deck from under the span
+    let under = |target_y: f64, dist: f64, eye_y: f64| {
+        ((eye_y - target_y) / dist).clamp(-0.35, 0.25)
+    };
+    vec![
+        // ON-DECK DRONE: ~8 m over the lane, looking down the span —
+        // markings, gutters, parapets and traffic all in frame
+        CameraShot {
+            name: format!("{}_deck", prefix),
+            target: [a1[0], deck_y + 1.2, a1[1]],
+            dist: 26.0,
+            yaw: yaw_along + 0.15,
+            pitch: 0.30,
+        },
+        // DECK CLOSE: low hover just over the surface
+        CameraShot {
+            name: format!("{}_deck_close", prefix),
+            target: [a2[0], deck_y + 0.3, a2[1]],
+            dist: 12.0,
+            yaw: yaw_along - 0.35,
+            pitch: 0.18,
+        },
+        // UNDER-DECK: from the ground beside the lower intersection, looking
+        // slightly up at the soffit, piers and the traffic below
+        CameraShot {
+            name: format!("{}_below", prefix),
+            target: [fx, deck_y - 0.8, fz],
+            dist: 30.0,
+            yaw: yaw_along + 1.35,
+            pitch: under(deck_y - 0.8, 30.0, ground_y + 1.8),
+        },
+        // PIER: close-up from the lower intersection
+        CameraShot {
+            name: format!("{}_pier", prefix),
+            target: [a3[0], deck_y - 1.5, a3[1]],
+            dist: 18.0,
+            yaw: yaw_along + 2.25,
+            pitch: under(deck_y - 1.5, 18.0, ground_y + 1.4),
+        },
+        // WIDE context
+        CameraShot {
+            name: format!("{}_wide", prefix),
+            target: [fx, deck_y, fz],
+            dist: (span * 0.30).clamp(220.0, 1500.0),
+            yaw: yaw_along + 0.8,
+            pitch: 0.50,
+        },
     ]
-    .into_iter()
-    .enumerate()
-    {
-        shots.push(CameraShot {
-            name: format!("{}_{}", prefix, name),
-            target: [focus[0], 8.0 + i as f64 * 6.0, focus[1]],
-            dist: d,
-            yaw: 0.65 + i as f64 * 0.4,
-            pitch: p,
-        });
-    }
-    shots
 }

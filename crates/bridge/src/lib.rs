@@ -16,6 +16,8 @@ const CEMENT_TINT: [f32; 4] = [1.30, 1.28, 1.24, 1.0];
 const ASPHALT_TINT: [f32; 4] = [1.45, 1.45, 1.47, 1.0];
 const RAIL_TINT: [f32; 4] = [1.15, 1.14, 1.10, 1.0];
 const PIER_TINT: [f32; 4] = [1.25, 1.23, 1.19, 1.0];
+/// painted-line tint for deck markings (bright white paint, flat)
+const MARK_TINT: [f32; 4] = [2.05, 2.05, 2.0, 1.0];
 
 /// texture slots (roadkit::textures)
 const TEX_ASPHALT: i32 = 4;
@@ -91,6 +93,9 @@ pub struct BridgeSpec {
     /// deck surface surface-type constant (roads::surface) — cement for
     /// concrete viaduct decks, e.g. the BRT Morogoro Road corridor
     pub surface: u8,
+    /// painted median width on the deck (0 = single carriageway, dashed
+    /// center line); BRT corridors carry a 3.0 m median
+    pub median_m: f64,
 }
 
 impl BridgeSpec {
@@ -114,6 +119,7 @@ impl BridgeSpec {
             } else {
                 roads::surface::ASPHALT
             },
+            median_m: if has_brt { 3.0 } else { 0.0 },
         }
     }
 
@@ -170,6 +176,10 @@ pub fn build_bridge(input: &BridgeInput, spec: &BridgeSpec) -> BridgeBuild {
     rails.tex = TEX_SIDEWALK;
     let mut piers = MeshPart::new(PIER_TINT);
     piers.tex = TEX_CEMENT;
+    // painted lane markings on the deck top — flat white paint, geometric
+    // dashes (tex -1 = plain vertex color, always crisp)
+    let mut marks = MeshPart::new(MARK_TINT);
+    marks.tex = -1;
 
     let n = pts.len();
     let half = spec.deck_width_m / 2.0;
@@ -232,6 +242,70 @@ pub fn build_bridge(input: &BridgeInput, spec: &BridgeSpec) -> BridgeBuild {
             let v0 = (cum[i] / uv_h) as f32;
             let v1 = (cum[i + 1] / uv_h) as f32;
             quad(&mut deck_top, a, b, c, d, 0.0, 1.0, v0, v1);
+
+            // painted markings, 2 cm above the deck top: solid edge lines at
+            // ±(half − 0.55) and a dashed center line (or per-carriageway
+            // dashed lines flanking the BRT median). Dashes are emitted
+            // geometrically (1.6 m on / 3.2 m period) in arc-length space.
+            {
+                let lift = 0.02f64;
+                let r2 = right(i + 1);
+                let p2 = pts[i + 1];
+                let (s0, s1) = (cum[i], cum[i + 1]);
+                let seg_len = (s1 - s0).max(1e-6);
+                let at = |t: f64, off: f64| {
+                    let rl = r[0] + (r2[0] - r[0]) * t;
+                    let rz = r[1] + (r2[1] - r[1]) * t;
+                    Vec3::new(
+                        (p.0 + (p2.0 - p.0) * t + rl * off) as f32,
+                        (top + lift) as f32,
+                        (p.2 + (p2.2 - p.2) * t + rz * off) as f32,
+                    )
+                };
+                let mut line = |o: f64, w: f64, dashed: bool| {
+                    let (oa, ob) = (o - w * 0.5, o + w * 0.5);
+                    let ranges: Vec<(f64, f64)> = if dashed {
+                        let (period, on) = (3.2f64, 1.6f64);
+                        let mut v = Vec::new();
+                        let mut k = (s0 / period).floor();
+                        while k * period < s1 {
+                            let a = (k * period).max(s0);
+                            let b = (k * period + on).min(s1);
+                            if b > a {
+                                v.push((a, b));
+                            }
+                            k += 1.0;
+                        }
+                        v
+                    } else {
+                        vec![(s0, s1)]
+                    };
+                    for (a, b) in ranges {
+                        let t0 = ((a - s0) / seg_len).clamp(0.0, 1.0);
+                        let t1 = ((b - s0) / seg_len).clamp(0.0, 1.0);
+                        quad(
+                            &mut marks,
+                            at(t0, oa),
+                            at(t0, ob),
+                            at(t1, ob),
+                            at(t1, oa),
+                            0.0,
+                            1.0,
+                            0.0,
+                            1.0,
+                        );
+                    }
+                };
+                line(-(half - 0.55), 0.15, false);
+                line(half - 0.55, 0.15, false);
+                if spec.median_m > 0.01 {
+                    let lane_c = spec.median_m * 0.5 + 1.75;
+                    line(-lane_c, 0.15, true);
+                    line(lane_c, 0.15, true);
+                } else {
+                    line(0.0, 0.18, true);
+                }
+            }
 
             // bottom face (reversed)
             let a2 = Vec3::new(a.x, bot as f32, a.z);
@@ -380,6 +454,7 @@ pub fn build_bridge(input: &BridgeInput, spec: &BridgeSpec) -> BridgeBuild {
     parts.push(deck_sides);
     parts.push(rails);
     parts.push(piers);
+    parts.push(marks);
 
     BridgeBuild {
         parts,

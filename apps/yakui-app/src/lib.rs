@@ -9,6 +9,14 @@
 use image::RgbaImage;
 
 pub const ASSETS: &str = "assets";
+
+/// Assets root: `TRAFFIC_SIM_ASSETS` env override, else `./assets` (repo run).
+fn assets_root() -> std::path::PathBuf {
+    match std::env::var("TRAFFIC_SIM_ASSETS") {
+        Ok(d) if !d.trim().is_empty() => std::path::PathBuf::from(d),
+        _ => std::path::PathBuf::from(ASSETS),
+    }
+}
 pub const OUT_DIR: &str = "screenshots";
 
 pub struct RunConfig {
@@ -51,7 +59,7 @@ pub struct Scene {
 /// Build the full data scene for a site ("kijazi" | "igesa") from the local
 /// cached raw data (no network needed).
 pub fn build_data_scene(site: &str) -> Result<Scene, String> {
-    let assets = std::path::Path::new(ASSETS);
+    let assets = assets_root();
     let data = assets.join("data");
     let mut imp = match site {
         "kijazi" => tsdata::import::kijazi_demo(&data),
@@ -248,7 +256,7 @@ pub fn build_data_scene(site: &str) -> Result<Scene, String> {
     }
     report.push(format!("junctions detected: {}", junctions.len()));
 
-    let library = roadkit::library::AssetLibrary::load_dir(assets);
+    let library = roadkit::library::AssetLibrary::load_dir(&assets);
     let textures = roadkit::textures::TextureLibrary::load_dir(&assets.join("textures"));
     Ok(Scene {
         state,
@@ -314,10 +322,11 @@ pub fn render_frame(
         cam,
         w * ss,
         h * ss,
-        [26, 28, 32, 255],
+        SKY_CLEAR,
         &[],
     );
-    let rgba = if ss > 1 { downsample(&big, w * ss, h * ss, ss) } else { big };
+    let mut rgba = if ss > 1 { downsample(&big, w * ss, h * ss, ss) } else { big };
+    paint_sky(&mut rgba, w, h, cam.pitch);
 
     if hud {
         let mut buf = rgba;
@@ -350,6 +359,44 @@ pub fn render_frame(
         return buf;
     }
     rgba
+}
+
+/// Sky clear color (light haze — also fills voids beyond the terrain square).
+const SKY_CLEAR: [u8; 4] = [178, 199, 220, 255];
+
+/// Replace flat background pixels ABOVE the horizon with a real-world sky
+/// gradient (zenith blue -> pale haze). Only pixels equal to the clear color
+/// are touched, so geometry that reaches above the horizon (bridge decks,
+/// buildings) is preserved. Horizon screen row for a roll-free OrbitCam with
+/// vertical fov 0.9: y_h = h/2 · (1 − tan(pitch)/tan(fov/2)); row 0 = top.
+fn paint_sky(rgba: &mut [u8], w: usize, h: usize, pitch: f32) {
+    const FOV_V: f32 = 0.9;
+    let t = pitch.tan() / (FOV_V / 2.0).tan();
+    let y_h = ((h as f32) / 2.0 * (1.0 - t)).round();
+    let y_h = (y_h as i32).clamp(0, h as i32) as usize;
+    if y_h == 0 {
+        return;
+    }
+    let zen = [92.0f32, 138.0, 198.0];
+    let hor = [199.0f32, 214.0, 229.0];
+    for y in 0..y_h {
+        let f = (y as f32 / y_h as f32).powf(0.8);
+        let r = (zen[0] + (hor[0] - zen[0]) * f) as u8;
+        let g = (zen[1] + (hor[1] - zen[1]) * f) as u8;
+        let b = (zen[2] + (hor[2] - zen[2]) * f) as u8;
+        let row = y * w * 4;
+        for x in 0..w {
+            let i = row + x * 4;
+            let is_bg = (rgba[i] as i32 - SKY_CLEAR[0] as i32).abs() <= 4
+                && (rgba[i + 1] as i32 - SKY_CLEAR[1] as i32).abs() <= 4
+                && (rgba[i + 2] as i32 - SKY_CLEAR[2] as i32).abs() <= 4;
+            if is_bg {
+                rgba[i] = r;
+                rgba[i + 1] = g;
+                rgba[i + 2] = b;
+            }
+        }
+    }
 }
 
 fn downsample(src: &[u8], sw: usize, sh: usize, f: usize) -> Vec<u8> {
@@ -402,24 +449,47 @@ pub fn run_capture(cfg: &RunConfig) -> Result<Vec<String>, String> {
         println!("[traffic-sim] {}", tk.report());
     }
 
-    // camera shots: hero orbit + bridge focus
+    // camera shots: hero orbit + bridge detail (zoomed, real-world pass)
     let mut shots = toolkit::hero_shots(&sc.state.curves, cfg.shots, &cfg.out_prefix);
-    if !sc.bridge_parts.is_empty() {
-        // aim the bridge shots at the deck centroid of the first bridge
-        let mut fx = 0.0f64;
-        let mut fz = 0.0f64;
-        let mut n = 0usize;
-        for p in sc.bridge_parts.iter().take(3) {
-            for v in p.positions.iter().step_by(7) {
-                fx += v.x as f64;
-                fz += v.z as f64;
-                n += 1;
+    if let Some(b) = sc
+        .bridge_info
+        .iter()
+        .max_by(|a, c| a.length_m.partial_cmp(&c.length_m).unwrap())
+    {
+        // sample the LONGEST bridge's own parts only (piers/railings of other
+        // bridges would drag the centroid off the span). y comes from the
+        // exact deck_y field — part vertices include piers/underside.
+        let mut pts: Vec<[f64; 3]> = Vec::new();
+        for p in &b.parts {
+            for v in p.positions.iter().step_by(5) {
+                pts.push([v.x as f64, v.y as f64, v.z as f64]);
             }
         }
-        if n > 0 {
+        if !pts.is_empty() {
+            let n = pts.len() as f64;
+            let cx = pts.iter().map(|p| p[0]).sum::<f64>() / n;
+            let cz = pts.iter().map(|p| p[2]).sum::<f64>() / n;
+            // along-deck axis: farthest sampled vertex pair (robust for
+            // diagonal spans) — O(n²) on a thinned sample
+            let thin: Vec<[f64; 3]> = pts.iter().step_by(4).copied().collect();
+            let mut best = (0.0f64, [1.0f64, 0.0]);
+            for i in 0..thin.len() {
+                for j in (i + 1)..thin.len() {
+                    let dx = thin[j][0] - thin[i][0];
+                    let dz = thin[j][2] - thin[i][2];
+                    let d2 = dx * dx + dz * dz;
+                    if d2 > best.0 {
+                        best = (d2, [dx, dz]);
+                    }
+                }
+            }
+            let dl = best.0.sqrt().max(1e-6);
+            let axis = [best.1[0] / dl, best.1[1] / dl];
             shots.extend(toolkit::focus_shots(
                 &sc.state.curves,
-                [fx / n as f64, fz / n as f64],
+                [cx, b.deck_y, cz],
+                b.deck_y - b.clear_below_m,
+                axis,
                 &format!("{}_bridge", cfg.out_prefix),
             ));
         }
