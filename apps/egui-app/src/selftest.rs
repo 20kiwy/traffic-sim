@@ -110,8 +110,9 @@ pub fn run() -> i32 {
 
     // 3. run each script on a fresh scene and check the pipeline
     //    (label, file, min curves, min props)
-    let expectations: [(&str, &str, usize, usize); 6] = [
+    let expectations: [(&str, &str, usize, usize); 7] = [
         ("Demo Highway", "demo_highway.gd", 1, 8),
+        ("RA Showcase", "ra_showcase.gd", 4, 10),
         ("Ring Loop", "ring_loop.gd", 1, 6),
         ("Grid Network", "grid_network.gd", 5, 6),
         ("Junction Test", "junction_test.gd", 5, 0),

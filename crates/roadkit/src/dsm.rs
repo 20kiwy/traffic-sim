@@ -32,7 +32,7 @@
 use crate::signals::{
     preset_tazara_4phase, preset_two_phase, preset_ubungo_2phase, SignalPlan, SignalRegistry,
 };
-use roads::model::{parse_turn_lanes, RoadCurve, RoadPoint, TurnDir};
+use roads::model::{parse_turn_lanes, BridgeStyle, RoadCurve, RoadPoint, TurnDir};
 use roads::surface;
 
 /* ------------- embedded OSM extracts (compact JSON) ------------- */
@@ -274,6 +274,8 @@ pub fn build_dsm() -> DsmScene {
 
     // R11 RoadArchitect-style guardrails on approaches/slips/BRT edges
     apply_guardrails(&mut curves);
+    // R12 RA bridge kit styles (suspension / semi-arch / tunnel flags)
+    apply_bridge_styles(&mut curves);
 
     // orient every auto_bearing point (the builders set the flag but the
     // GRG-style re-orientation normally runs from the script bridge only —
@@ -1147,6 +1149,12 @@ use crate::props::{join_along, stamp, JoinParams, PropInstance};
 /// Flag curves for RoadArchitect-style W-beam guardrails (docs §2):
 /// flyover approach ramps, slip roads and BRT corridors. Logic-restricted —
 /// arterials at grade stay open.
+///
+/// R12 also flags the RA `GSDCableBarrier` on the median curves: any
+/// guardrail-flagged curve that carries a real median (max point median
+/// ≥ 2.0 m — station flares / wide medians) or is a BRT median busway
+/// of the Sam Nujoma / Morogoro / Nelson Mandela corridors gets the
+/// flexible cable barrier between the carriageways.
 pub fn apply_guardrails(curves: &mut [RoadCurve]) {
     for c in curves.iter_mut() {
         let n = c.name.to_lowercase();
@@ -1155,6 +1163,22 @@ pub fn apply_guardrails(curves: &mut [RoadCurve]) {
             || n.contains("brt")
             || n.contains("ramp")
             || n.contains("bridge");
+        let med = c.points.iter().map(|p| p.median).fold(0.0f64, f64::max);
+        c.cable_barrier = c.guardrail && (med >= 2.0 || (n.contains("brt") && med > 0.0));
+    }
+}
+
+/// R12 RA bridge kit styles: the elevated Selanda bridge curve (Mandela
+/// × Kilwa) carries the suspension kit. Only applied when an ELEVATED
+/// curve named "Selanda" actually exists — the current OSM/JICA network
+/// builds Selanda as an at-grade channelized junction, so this is a
+/// documented no-op until a grade-separated Selanda crossing lands
+/// (synthesizing a demo curve here is not allowed).
+pub fn apply_bridge_styles(curves: &mut [RoadCurve]) {
+    for c in curves.iter_mut() {
+        if c.name.to_lowercase().contains("selanda") && c.has_elevated() {
+            c.bridge_style = BridgeStyle::Suspension;
+        }
     }
 }
 
@@ -1244,6 +1268,11 @@ pub fn dsm_props_capped(curves: &[RoadCurve], max_range: f64) -> Vec<PropInstanc
         }
     }
 
+    // R12 Igesa BRT Phase-4 rebuild workzone (RA Interactive props:
+    // TrafficCone / Barrels / GSDAtten) — exported separately as
+    // `dsm_workzone` so every caller of dsm_props_capped gets it
+    out.extend(dsm_workzone(curves));
+
     // junction-clearing gate: drop props standing on crossing pavement
     // (any two curves' points within 12 m); local close-ups also cap the
     // range so nothing renders at the fog edge (floating-trees artifact)
@@ -1259,6 +1288,68 @@ pub fn dsm_props_capped(curves: &[RoadCurve], max_range: f64) -> Vec<PropInstanc
 /// Full-scene props (no range cap — the app recenter keeps everything).
 pub fn dsm_props(curves: &[RoadCurve]) -> Vec<PropInstance> {
     dsm_props_capped(curves, f64::INFINITY)
+}
+
+/// R12 Igesa BRT Phase-4 rebuild workzone (RA Interactive props:
+/// TrafficCone / Barrels / GSDAtten): cones every 6 m (tangent yaw,
+/// alternating ±paved/2+1.5) + drums every 18 m (lateral +paved/2+2.5)
+/// along the first/last 120 m of every Igesa curve, plus one impact
+/// attenuator per end of the first Igesa curve (+3 m lateral). Totals
+/// are capped at ~140 cones / 50 barrels.
+pub fn dsm_workzone(curves: &[RoadCurve]) -> Vec<PropInstance> {
+    let mut out = Vec::new();
+    const ZONE_M: f64 = 120.0;
+    const CONE_CAP: usize = 140;
+    const BARREL_CAP: usize = 50;
+    let mut cones = 0usize;
+    let mut barrels = 0usize;
+    let mut first_done = false;
+    for c in curves {
+        if !c.name.to_lowercase().contains("igesa") {
+            continue;
+        }
+        let len = c.length_m();
+        if len < 8.0 {
+            continue;
+        }
+        let paved = c.paved_width();
+        let in_zone = |s: f64| s < ZONE_M || s > len - ZONE_M;
+        // cones every 6 m, alternating ±(paved/2 + 1.5), tangent-aligned
+        let mut side = 1.0f64;
+        let mut s = 3.0;
+        while s < len && cones < CONE_CAP {
+            if in_zone(s) {
+                if let Some(p) = stamp(c, "cone", s / len, (paved / 2.0 + 1.5) * side, true, 1.0) {
+                    out.push(p);
+                    cones += 1;
+                }
+                side = -side;
+            }
+            s += 6.0;
+        }
+        // channelizer drums every 18 m on the +lateral side
+        let mut s = 9.0;
+        while s < len && barrels < BARREL_CAP {
+            if in_zone(s) {
+                if let Some(p) = stamp(c, "barrel", s / len, paved / 2.0 + 2.5, true, 1.0) {
+                    out.push(p);
+                    barrels += 1;
+                }
+            }
+            s += 18.0;
+        }
+        // impact attenuators at the workzone entry: one per end of the
+        // FIRST Igesa curve, +3 m off the centerline
+        if !first_done {
+            for t in [3.0 / len, (len - 3.0) / len] {
+                if let Some(p) = stamp(c, "attenuator", t, 3.0, true, 1.0) {
+                    out.push(p);
+                }
+            }
+            first_done = true;
+        }
+    }
+    out
 }
 
 /// True when (x, z) sits within `r` of ANOTHER curve's samples (crossing

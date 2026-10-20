@@ -34,9 +34,10 @@
 //! - every strip rides the interpolated `RoadPoint.elev`; with the
 //!   default elev = 0 the output is identical to the flat mesh.
 
-use crate::model::RoadCurve;
+use crate::model::{BridgeStyle, RoadCurve};
 use gdmath::vec2::Vec2;
 use gdmath::vec3::Vec3;
+use std::ops::{Mul, Sub};
 
 #[derive(Clone, Debug)]
 pub struct MeshPart {
@@ -107,6 +108,9 @@ pub const TEX_RA_RAILING: i32 = 13;
 pub const TEX_RA_BRICK: i32 = 14;
 pub const TEX_RA_COBBLE: i32 = 15;
 pub const TEX_WINDOWS: i32 = 16;
+pub const TEX_RA_CONCRETE2: i32 = 17;
+pub const TEX_RA_CONCRETE3: i32 = 18;
+pub const TEX_RA_DIRT: i32 = 19;
 
 pub const ROAD_TINT: [f32; 4] = [1.55, 1.55, 1.55, 1.0];
 pub const CONCRETE_TINT: [f32; 4] = [1.35, 1.35, 1.35, 1.0];
@@ -1534,4 +1538,580 @@ pub fn krail_parts(curve: &RoadCurve) -> Vec<MeshPart> {
     }
     parts.push(part);
     parts
+}
+
+/* ------------- R12 — GSDTunnel, special bridge kits, GSDCableBarrier ------------- */
+
+/// Push an oriented box between two 3D points with a `w` × `h`
+/// cross-section (8 verts, 6 quads) — the workhorse for tower legs,
+/// cables, hangers and barrier posts. Near-vertical rods measure `w`
+/// along `side` (lateral) and `h` along the road tangent; slanted or
+/// horizontal rods measure `w` horizontally across the axis and `h`
+/// vertically.
+fn push_rod(part: &mut MeshPart, a: Vec3, b: Vec3, side: (f32, f32), w: f32, h: f32) {
+    let d = b.sub(a);
+    let len = d.len().max(1e-6);
+    let t = d.mul(1.0 / len);
+    // cross-section axes (u, v) perpendicular to the rod axis
+    let (u, v) = if t.y.abs() > 0.98 {
+        // vertical rod: horizontal cross-section — lateral × tangent
+        let sl = side.0.hypot(side.1).max(1e-6);
+        let u = Vec3::new(side.0 / sl, 0.0, side.1 / sl);
+        let v = u.cross(t).normalized();
+        (u, v)
+    } else {
+        // slanted / horizontal rod: vertical axis + horizontal lateral
+        let v = Vec3::new(-t.x * t.y, 1.0 - t.y * t.y, -t.z * t.y).normalized();
+        let u = v.cross(t).normalized();
+        (u, v)
+    };
+    let hw = w * 0.5;
+    let hh = h * 0.5;
+    let base = part.positions.len() as u32;
+    for end in [a, b] {
+        for su in [-1.0f32, 1.0] {
+            for sv in [-1.0f32, 1.0] {
+                part.positions.push(Vec3::new(
+                    end.x + u.x * su * hw + v.x * sv * hh,
+                    end.y + u.y * su * hw + v.y * sv * hh,
+                    end.z + u.z * su * hw + v.z * sv * hh,
+                ));
+            }
+        }
+    }
+    // ring per end: (+u,+v), (-u,+v), (-u,-v), (+u,-v); ends a = 0..4, b = 4..8
+    let q = |i: u32, j: u32| base + i * 4 + j;
+    for (a0, b0, c0, d0) in [
+        (q(0, 0), q(0, 1), q(0, 2), q(0, 3)), // a cap
+        (q(1, 0), q(1, 1), q(1, 2), q(1, 3)), // b cap
+        (q(0, 0), q(1, 0), q(1, 1), q(0, 1)),
+        (q(0, 1), q(1, 1), q(1, 2), q(0, 2)),
+        (q(0, 2), q(1, 2), q(1, 3), q(0, 3)),
+        (q(0, 3), q(1, 3), q(1, 0), q(0, 0)),
+    ] {
+        part.uv.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        part.indices.extend_from_slice(&[a0, b0, c0, a0, c0, d0]);
+    }
+}
+
+/// Sweep a tunnel vault cross-section `[(lateral, height), ...]` along
+/// `frames` (position + left normal), quad strip between consecutive
+/// rings — the arch/wall skin of `tunnel_parts`.
+fn sweep_vault(part: &mut MeshPart, frames: &[(Vec3, f32, f32)], cross: &[(f32, f32)], tile: f32) {
+    let mut arc = 0.0f32;
+    let mut prev: Option<Vec<u32>> = None;
+    for (i, (p, nx, nz)) in frames.iter().enumerate() {
+        if i > 0 {
+            let g = frames[i - 1].0;
+            arc += (p.x - g.x).hypot(p.z - g.z);
+        }
+        let mut ring = Vec::with_capacity(cross.len());
+        for (lx, ly) in cross {
+            ring.push(part.positions.len() as u32);
+            part.positions.push(Vec3::new(p.x + nx * lx, p.y + ly, p.z + nz * lx));
+            part.uv.push([arc / tile.max(0.05), ly / 6.0]);
+        }
+        if let Some(prev) = prev.take() {
+            for k in 0..cross.len() - 1 {
+                part.indices.extend_from_slice(&[
+                    prev[k], ring[k], ring[k + 1], prev[k], ring[k + 1], prev[k + 1],
+                ]);
+            }
+        }
+        prev = Some(ring);
+    }
+}
+
+/// RoadArchitect `GSDTunnel-2L/4L/6L` (Mesh/RoadObj/Tunnel + caps +
+/// interior lights): a half-cylinder vault around the road — springing
+/// walls from deck level up to +0.9 m, a 12-division arch to the crown,
+/// concrete outer skin + slightly darker inner face, flat portal faces
+/// closing both ends and warm strip lights along the crown every 20 m.
+pub fn tunnel_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if !curve.tunnel {
+        return parts;
+    }
+    let pts = curve.centerline(q.sample_m.max(1.0));
+    if pts.len() < 2 {
+        return parts;
+    }
+    // vault radius: RA sizes the tunnel per lane count (GSDTunnel-2L/4L/6L)
+    // — base from the paved width, nudged up per lane pair
+    let lanes = curve.lanes_per_side().max(1) as f64;
+    let r = ((curve.paved_width() * 0.62).max(4.0) + (lanes - 2.0).max(0.0) * 0.4) as f32;
+    const SPRING_H: f32 = 0.9; // springing line above the deck
+    const ARCH_DIV: usize = 12; // arch segments per cross-section
+    const SKIN: f32 = 0.12; // inner/outer skin separation
+
+    // cross-section ring (local lateral x, height above deck y):
+    // wall base L, springing L, 12 arch points, springing R, wall base R
+    let ring = |rad: f32| -> Vec<(f32, f32)> {
+        let mut v = Vec::with_capacity(ARCH_DIV + 3);
+        v.push((-rad, 0.0));
+        v.push((-rad, SPRING_H));
+        for k in 1..=ARCH_DIV {
+            let t = k as f32 / ARCH_DIV as f32;
+            let ang = std::f32::consts::PI * (1.0 - t);
+            v.push((rad * ang.cos(), SPRING_H + rad * ang.sin()));
+        }
+        v.push((rad, 0.0));
+        v
+    };
+    let outer = ring(r);
+    let inner = ring((r - SKIN).max(1.0));
+
+    // per-sample frames (position + left normal)
+    let mut frames: Vec<(Vec3, f32, f32)> = Vec::with_capacity(pts.len());
+    for (i, p) in pts.iter().enumerate() {
+        let a = if i > 0 { &pts[i - 1] } else { p };
+        let b = if i + 1 < pts.len() { &pts[i + 1] } else { p };
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let l = dx.hypot(dz).max(1e-6);
+        frames.push((*p, -dz / l as f32, dx / l as f32));
+    }
+
+    // vault skins: textured concrete outside, slightly darker inside
+    let mut out_part = MeshPart::new(CONCRETE_TINT);
+    out_part.tex = TEX_RA_CONCRETE;
+    let mut in_part = MeshPart::new([1.02, 1.0, 0.96, 1.0]); // darker interior
+    in_part.tex = TEX_RA_CONCRETE;
+    sweep_vault(&mut out_part, &frames, &outer, 4.0);
+    sweep_vault(&mut in_part, &frames, &inner, 4.0);
+    parts.push(out_part);
+    parts.push(in_part);
+
+    // portal faces at both ends: flat ring wall closing the arch section
+    let mut portal = MeshPart::new(CONCRETE_TINT);
+    portal.tex = TEX_RA_CONCRETE2;
+    for &end in &[0usize, frames.len() - 1] {
+        let (p, nx, nz) = frames[end];
+        let base = portal.positions.len() as u32;
+        // fan center + ring polygon (u/v = lateral/4, height/4 planar map)
+        portal
+            .positions
+            .push(Vec3::new(p.x, p.y + SPRING_H + r * 0.5, p.z));
+        portal.uv.push([0.0, (SPRING_H + r * 0.5) / 4.0]);
+        for (lx, ly) in &outer {
+            portal.positions.push(Vec3::new(p.x + nx * lx, p.y + ly, p.z + nz * lx));
+            portal.uv.push([lx / 4.0, ly / 4.0]);
+        }
+        for k in 0..outer.len() {
+            let k1 = (k + 1) % outer.len();
+            portal.indices.extend_from_slice(&[base, base + 1 + k as u32, base + 1 + k1 as u32]);
+        }
+    }
+    parts.push(portal);
+
+    // interior strip lights: small warm boxes at the crown every 20 m
+    let mut lights = MeshPart::new(rgb([255, 214, 130], 1.0));
+    let mut since = 20.0f32; // force a light at the portal
+    for (i, (p, nx, nz)) in frames.iter().enumerate() {
+        if i > 0 {
+            let g = frames[i - 1].0;
+            since += (p.x - g.x).hypot(p.z - g.z);
+        }
+        if since < 20.0 {
+            continue;
+        }
+        since = 0.0;
+        let a = frames[i.saturating_sub(1)].0;
+        let b = frames[(i + 1).min(frames.len() - 1)].0;
+        let t = Vec3::new(b.x - a.x, 0.0, b.z - a.z).normalized();
+        let half_t = t.mul(0.7); // 1.4 m long fixture
+        let cy = p.y + SPRING_H + r - 0.18;
+        push_rod(
+            &mut lights,
+            Vec3::new(p.x - half_t.x, cy, p.z - half_t.z),
+            Vec3::new(p.x + half_t.x, cy, p.z + half_t.z),
+            (*nx, *nz),
+            0.22,
+            0.10,
+        );
+    }
+    parts.push(lights);
+    parts
+}
+
+/// RoadArchitect suspension bridge kit (Editor/Library/B suspension
+/// set): towers at both curve ends + every 150 m of arc (two 0.9 m
+/// square legs + crossbeams at +18/+25 m), catenary main cables (sag
+/// 16 m at mid-span, sampled every 3 m) and vertical hangers down to
+/// the deck edges every 5 m.
+pub fn suspension_parts(curve: &RoadCurve) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if curve.bridge_style != BridgeStyle::Suspension {
+        return parts;
+    }
+    let (pts, cum, yaws) = curve.arc_table();
+    if pts.len() < 2 {
+        return parts;
+    }
+    let total = *cum.last().unwrap();
+    let half = (curve.paved_width() / 2.0) as f32;
+    const TOWER_H: f32 = 26.0;
+    const SAG: f32 = 16.0;
+    const TOWER_SPACING: f64 = 150.0;
+    let cable_off = half + 1.2;
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+
+    // frame (position + left normal) at arc distance s
+    let frame_at = |s: f64| -> (Vec3, f32, f32) {
+        let d = s.clamp(0.0, total);
+        let mut i = 1usize;
+        while i < cum.len() - 1 && cum[i] < d {
+            i += 1;
+        }
+        let seg = (cum[i] - cum[i - 1]).max(1e-9);
+        let t = ((d - cum[i - 1]) / seg).clamp(0.0, 1.0) as f32;
+        let p = pts[i - 1].lerp(pts[i], t);
+        let yaw = yaws[i] as f32;
+        (p, -yaw.sin(), yaw.cos())
+    };
+
+    // tower arc positions: both curve ends + every 150 m of arc length
+    let mut tower_s: Vec<f64> = vec![0.0];
+    let mut s = TOWER_SPACING;
+    while s < total - 60.0 {
+        tower_s.push(s);
+        s += TOWER_SPACING;
+    }
+    tower_s.push(total);
+
+    // towers: 0.9 m square legs +18/+25 m crossbeams
+    let mut tower_part = MeshPart::new(rgb([148, 152, 158], 1.0)); // painted steel
+    tower_part.tex = TEX_RA_GALV;
+    for &ts in &tower_s {
+        let (p, nx, nz) = frame_at(ts);
+        for side in [-1.0f32, 1.0] {
+            let lx = p.x + nx * side * cable_off;
+            let lz = p.z + nz * side * cable_off;
+            push_rod(
+                &mut tower_part,
+                Vec3::new(lx, p.y - 1.0, lz),
+                Vec3::new(lx, p.y + TOWER_H, lz),
+                (nx, nz),
+                0.9,
+                0.9,
+            );
+        }
+        for bh in [18.0f32, 25.0] {
+            push_rod(
+                &mut tower_part,
+                Vec3::new(p.x - nx * cable_off, p.y + bh, p.z - nz * cable_off),
+                Vec3::new(p.x + nx * cable_off, p.y + bh, p.z + nz * cable_off),
+                (nx, nz),
+                0.8,
+                0.9,
+            );
+        }
+    }
+    parts.push(tower_part);
+
+    // main cables: catenary (parabolic sag) between adjacent tower tops
+    let mut cable_part = MeshPart::new(rgb([172, 176, 182], 1.0)); // galv steel
+    cable_part.tex = TEX_RA_GALV;
+    let mut hanger_part = MeshPart::new(rgb([168, 172, 178], 1.0));
+    hanger_part.tex = TEX_RA_GALV;
+    for side in [-1.0f32, 1.0] {
+        for w in tower_s.windows(2) {
+            let (s0, s1) = (w[0], w[1]);
+            let span = (s1 - s0).max(1.0);
+            let n = ((span / 3.0).ceil() as usize).max(2);
+            let (p0, _, _) = frame_at(s0);
+            let (p1, _, _) = frame_at(s1);
+            let (top0, top1) = (p0.y + TOWER_H, p1.y + TOWER_H);
+            let mut prev: Option<Vec3> = None;
+            for k in 0..=n {
+                let u = k as f32 / n as f32;
+                let sp = s0 + span * u as f64;
+                let (p, nx, nz) = frame_at(sp);
+                let y = lerp(top0, top1, u) - 4.0 * SAG * u * (1.0 - u);
+                let pt = Vec3::new(p.x + nx * side * cable_off, y, p.z + nz * side * cable_off);
+                if let Some(a) = prev {
+                    push_rod(&mut cable_part, a, pt, (nx, nz), 0.12, 0.12);
+                }
+                prev = Some(pt);
+            }
+        }
+        // vertical hangers from cable to deck edge every 5 m
+        let mut hs = 5.0f64;
+        while hs < total - 1.0 {
+            hs += 5.0;
+            // skip hangers within 4 m of a tower (they coincide with the legs)
+            if !tower_s.iter().all(|ts| (ts - hs).abs() > 4.0) {
+                continue;
+            }
+            // span containing hs
+            let mut si = 0usize;
+            for (k, w) in tower_s.windows(2).enumerate() {
+                if hs >= w[0] && hs <= w[1] {
+                    si = k;
+                }
+            }
+            let (s0, s1) = (tower_s[si], tower_s[si + 1]);
+            let u = ((hs - s0) / (s1 - s0).max(1.0)) as f32;
+            let (p0, _, _) = frame_at(s0);
+            let (p1, _, _) = frame_at(s1);
+            let (top0, top1) = (p0.y + TOWER_H, p1.y + TOWER_H);
+            let cy = lerp(top0, top1, u) - 4.0 * SAG * u * (1.0 - u);
+            let (p, nx, nz) = frame_at(hs);
+            let deck_y = p.y + 0.2;
+            if cy <= deck_y + 0.6 {
+                continue;
+            }
+            let lx = p.x + nx * side * cable_off;
+            let lz = p.z + nz * side * cable_off;
+            push_rod(
+                &mut hanger_part,
+                Vec3::new(lx, deck_y, lz),
+                Vec3::new(lx, cy, lz),
+                (nx, nz),
+                0.06,
+                0.06,
+            );
+        }
+    }
+    parts.push(cable_part);
+    parts.push(hanger_part);
+    parts
+}
+
+/// RoadArchitect semi-arch kit (BridgeBase6/7/8-*40M): two concrete
+/// arch ribs (±(paved/2 + 0.8)) rising from deck level at the span ends
+/// to span/5 above the crown at mid-span, plus spandrel columns every
+/// 8 m of arc holding the deck underside from the ribs.
+pub fn arch_parts(curve: &RoadCurve) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if curve.bridge_style != BridgeStyle::Arch {
+        return parts;
+    }
+    let pts = curve.centerline(4.0);
+    if pts.len() < 2 {
+        return parts;
+    }
+    let total = curve.length_m().max(1.0);
+    let half = (curve.paved_width() / 2.0) as f32;
+    let rib_off = half + 0.8;
+    const RIB_W: f32 = 0.8;
+    const N_RIB: usize = 24;
+    let crown = (total as f32) / 5.0;
+
+    // cumulative arc + frame helper on the 4 m centerline
+    let mut cum = Vec::with_capacity(pts.len());
+    cum.push(0.0f64);
+    for i in 1..pts.len() {
+        let dx = (pts[i].x - pts[i - 1].x) as f64;
+        let dz = (pts[i].z - pts[i - 1].z) as f64;
+        cum.push(cum[i - 1] + dx.hypot(dz));
+    }
+    let frame_at = |s: f64| -> (Vec3, f32, f32) {
+        let d = s.clamp(0.0, total);
+        let mut i = 1usize;
+        while i < cum.len() - 1 && cum[i] < d {
+            i += 1;
+        }
+        let seg = (cum[i] - cum[i - 1]).max(1e-9);
+        let t = ((d - cum[i - 1]) / seg).clamp(0.0, 1.0) as f32;
+        let p = pts[i - 1].lerp(pts[i], t);
+        let a = if i > 0 { pts[i - 1] } else { pts[i] };
+        let b = if i + 1 < pts.len() { pts[i + 1] } else { pts[i] };
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let l = dx.hypot(dz).max(1e-6);
+        (p, -(dz / l) as f32, (dx / l) as f32)
+    };
+
+    let mut rib_part = MeshPart::new(CONCRETE_TINT);
+    rib_part.tex = TEX_RA_CONCRETE;
+    let mut col_part = MeshPart::new(CONCRETE_TINT);
+    col_part.tex = TEX_RA_CONCRETE;
+
+    // arch ribs: 24 samples, deck level at the ends → crown at mid-span
+    for side in [-1.0f32, 1.0] {
+        let mut prev: Option<Vec3> = None;
+        for k in 0..=N_RIB {
+            let u = k as f32 / N_RIB as f32;
+            let s = total * u as f64;
+            let (p, nx, nz) = frame_at(s);
+            let rise = 4.0 * crown * u * (1.0 - u);
+            let c = Vec3::new(p.x + nx * side * rib_off, p.y + rise, p.z + nz * side * rib_off);
+            if let Some(a) = prev {
+                push_rod(&mut rib_part, a, c, (nx, nz), RIB_W, RIB_W);
+            }
+            prev = Some(c);
+        }
+    }
+
+    // spandrel columns every 8 m of arc from rib to deck underside
+    let mut s = 8.0f64;
+    while s < total - 8.0 {
+        let u = (s as f32) / total as f32;
+        let rise = 4.0 * crown * u * (1.0 - u);
+        if rise > 1.2 {
+            let (p, nx, nz) = frame_at(s);
+            for side in [-1.0f32, 1.0] {
+                let lx = p.x + nx * side * rib_off;
+                let lz = p.z + nz * side * rib_off;
+                push_rod(
+                    &mut col_part,
+                    Vec3::new(lx, p.y - 0.35, lz),
+                    Vec3::new(lx, p.y + rise, lz),
+                    (nx, nz),
+                    0.5,
+                    0.5,
+                );
+            }
+        }
+        s += 8.0;
+    }
+    parts.push(rib_part);
+    parts.push(col_part);
+    parts
+}
+
+/// RoadArchitect `GSDCableBarrier` (-Light/-Pole, GSDCableBarrier
+/// material): flexible barrier in the median — slim galvanised posts
+/// every 4 m at ±median/2 (±0.4 m on narrow medians) plus 3 horizontal
+/// cables per side at 0.35 / 0.50 / 0.65 m above the deck.
+pub fn cable_barrier_parts(curve: &RoadCurve) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if !curve.cable_barrier {
+        return parts;
+    }
+    let Some(first) = curve.points.first() else { return parts };
+    let med_half = if first.median >= 1.0 { first.median / 2.0 } else { 0.4 };
+    let pts = curve.centerline(4.0);
+    if pts.len() < 2 {
+        return parts;
+    }
+    let mut post_part = MeshPart::new(rgb([122, 126, 132], 1.0)); // galv posts
+    post_part.tex = TEX_RA_GALV;
+    let mut cable_part = MeshPart::new(rgb([152, 156, 162], 1.0)); // steel cables
+    cable_part.tex = TEX_RA_GALV;
+    const CABLE_H: [f32; 3] = [0.35, 0.50, 0.65];
+    for side in [-1.0f32, 1.0] {
+        let off = (med_half as f32) * side;
+        let mut prev_post: Option<Vec3> = None;
+        for (i, p) in pts.iter().enumerate() {
+            let a = if i > 0 { &pts[i - 1] } else { p };
+            let b = if i + 1 < pts.len() { &pts[i + 1] } else { p };
+            let (dx, dz) = (b.x - a.x, b.z - a.z);
+            let l = dx.hypot(dz).max(1e-6);
+            let (nx, nz) = (-(dz / l) as f32, (dx / l) as f32);
+            let px = p.x + nx * off;
+            let pz = p.z + nz * off;
+            // 0.7 m post (thin box, embedded 0.1 m)
+            push_rod(
+                &mut post_part,
+                Vec3::new(px, p.y - 0.1, pz),
+                Vec3::new(px, p.y + 0.7, pz),
+                (nx, nz),
+                0.12,
+                0.10,
+            );
+            // 3 cables spanning between consecutive posts
+            if let Some(pp) = prev_post {
+                for &h in &CABLE_H {
+                    push_rod(
+                        &mut cable_part,
+                        Vec3::new(pp.x, pp.y + h, pp.z),
+                        Vec3::new(px, p.y + h, pz),
+                        (nx, nz),
+                        0.03,
+                        0.03,
+                    );
+                }
+            }
+            prev_post = Some(Vec3::new(px, p.y, pz));
+        }
+    }
+    parts.push(post_part);
+    parts.push(cable_part);
+    parts
+}
+
+#[cfg(test)]
+mod r12_tests {
+    use super::*;
+    use crate::model::RoadPoint;
+
+    /// 400 m straight 4-lane curve with a 2.4 m median.
+    fn straight() -> RoadCurve {
+        let mut c = RoadCurve::new("R12 test");
+        for i in 0..5 {
+            let mut p = RoadPoint::new(-200.0 + i as f64 * 100.0, 0.0);
+            p.auto_bearing = true;
+            p.lanes = 4;
+            p.median = 2.4;
+            p.elev = if i == 2 { 9.0 } else { 0.0 }; // hump = "bridge"
+            c.add_point(p);
+        }
+        c
+    }
+
+    #[test]
+    fn tunnel_vault_portals_and_lights() {
+        let mut c = straight();
+        c.tunnel = true;
+        let parts = tunnel_parts(&c, MeshQuality { markings: true, sample_m: 4.0 });
+        // outer skin + inner skin + portal + lights
+        assert_eq!(parts.len(), 4, "expected 4 tunnel parts");
+        let tris: usize = parts.iter().map(|p| p.indices.len() / 3).sum();
+        assert!(tris > 3000, "vault too coarse: {tris} tris");
+        assert_eq!(parts[2].tex, TEX_RA_CONCRETE2, "portals use the concrete2 slot");
+        // off flag = zero cost
+        let mut off = straight();
+        off.tunnel = false;
+        assert!(tunnel_parts(&off, MeshQuality::default()).is_empty());
+    }
+
+    #[test]
+    fn suspension_kit_pieces() {
+        let mut c = straight();
+        c.bridge_style = BridgeStyle::Suspension;
+        let parts = suspension_parts(&c);
+        assert_eq!(parts.len(), 3, "towers + cables + hangers");
+        let tower_tris: usize = parts[0].indices.len() / 3;
+        // 2 towers (ends) x (2 legs + 2 crossbeams) x 12 tris
+        assert!(tower_tris >= 48, "tower geometry missing: {tower_tris}");
+        let cable_tris: usize = parts[1].indices.len() / 3;
+        assert!(cable_tris > 200, "main cables too sparse: {cable_tris}");
+        assert!(parts[2].indices.len() / 3 > 100, "hangers missing");
+        // default style = empty
+        let mut off = straight();
+        off.bridge_style = BridgeStyle::Girder;
+        assert!(suspension_parts(&off).is_empty());
+    }
+
+    #[test]
+    fn arch_ribs_and_spandrels() {
+        let mut c = straight();
+        c.bridge_style = BridgeStyle::Arch;
+        let parts = arch_parts(&c);
+        assert_eq!(parts.len(), 2, "ribs + spandrel columns");
+        // 24 segments x 12 tris x 2 ribs = 576
+        assert_eq!(parts[0].indices.len() / 3, 576, "rib sampling must be 24 pts");
+        assert!(parts[1].indices.len() / 3 > 0, "spandrel columns missing");
+        let mut off = straight();
+        off.bridge_style = BridgeStyle::BoxGirder;
+        assert!(arch_parts(&off).is_empty());
+    }
+
+    #[test]
+    fn cable_barrier_posts_and_cables() {
+        let mut c = straight();
+        c.cable_barrier = true;
+        let parts = cable_barrier_parts(&c);
+        assert_eq!(parts.len(), 2, "posts + cables");
+        // ~100 posts/side x 2 sides, 12 tris each (sample count varies
+        // slightly with the Bezier flattening, so use a range check)
+        let post_tris = parts[0].indices.len() / 3;
+        assert!(post_tris >= 200 * 12 && post_tris % 12 == 0, "posts: {post_tris}");
+        // 3 cables x ~100 spans x 2 sides x 12 tris
+        let cable_tris = parts[1].indices.len() / 3;
+        assert!(cable_tris >= 99 * 3 * 2 * 12 && cable_tris % (3 * 2 * 12) == 0, "cables: {cable_tris}");
+        let mut off = straight();
+        off.cable_barrier = false;
+        assert!(cable_barrier_parts(&off).is_empty());
+    }
 }

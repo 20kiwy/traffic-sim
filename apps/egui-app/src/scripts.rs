@@ -7,6 +7,7 @@ pub const JUNCTION: &str = include_str!("../../../assets/scripts/junction_test.g
 pub const TEXTURES: &str = include_str!("../../../assets/scripts/texture_showcase.gd");
 pub const TRAFFIC: &str = include_str!("../../../assets/scripts/traffic_junction.gd");
 pub const BRT: &str = include_str!("../../../assets/scripts/brt_corridor.gd");
+pub const RA_SHOWCASE: &str = include_str!("../../../assets/scripts/ra_showcase.gd");
 pub const SC_CITY: &str = include_str!("../../../assets/scenarios/city_grid.gd");
 pub const SC_PLAZA: &str = include_str!("../../../assets/scenarios/roundabout_square.gd");
 pub const SC_HWY: &str = include_str!("../../../assets/scenarios/highway_ramps.gd");
@@ -19,6 +20,7 @@ pub const SC_DAR: &str = include_str!("../../../assets/scenarios/dar_crossing.gd
 pub fn all() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
         ("Demo Highway", "demo_highway.gd", DEMO),
+        ("RA Showcase", "ra_showcase.gd", RA_SHOWCASE),
         ("Ring Loop", "ring_loop.gd", RING),
         ("Grid Network", "grid_network.gd", GRID),
         ("Junction Test", "junction_test.gd", JUNCTION),

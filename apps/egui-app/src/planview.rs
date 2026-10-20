@@ -62,7 +62,10 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 Stroke::new(1.0, axis_col),
             );
 
-            // ---------- curves ----------
+            // ---------- curves, PASS 1: road bodies ----------
+            // Draw order fixed (the old "messy vector" plan): bodies →
+            // junction pads → markings. Junction polygons used to be painted
+            // OVER the lane markings as opaque gray blobs.
             for (ci, c) in curves.iter().enumerate() {
                 if !c.visible || c.points.is_empty() {
                     continue;
@@ -76,25 +79,81 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     .map(|p| app.plan_to_screen(Vec2::new(p.x as f64, p.z as f64), &rect))
                     .collect();
                 let paved_px = (c.paved_width() * app.plan.scale).max(1.5) as f32;
-                let edge_px = (0.3 * app.plan.scale).max(0.8) as f32;
                 let selected = (app.sel.map(|(s, _)| s == ci).unwrap_or(false) || app.sel_container == Some(ci))
                     && app.sel_junction.is_none();
 
+                let dirt = c.points.iter().any(|p| p.dirt);
+                let surface = if dirt { [122, 96, 66] } else { ASPHALT };
+                let casing = if dirt { [84, 64, 42] } else { [28, 30, 34] };
+
                 if selected {
-                    painter.add(egui::Shape::line(pts.clone(), Stroke::new(paved_px + 6.0, t.accent.gamma_multiply(0.5))));
+                    painter.add(egui::Shape::line(pts.clone(), Stroke::new(paved_px + 7.0, t.accent.gamma_multiply(0.5))));
                 }
-                let surface = if c.points.iter().any(|p| p.dirt) { [122, 96, 66] } else { ASPHALT };
-                // edge lines (white) drawn as an outer stroke, asphalt on top
-                painter.add(egui::Shape::line(pts.clone(), Stroke::new(paved_px, color32(MARKING_WHITE, 0.95))));
-                painter.add(egui::Shape::line(
-                    pts.clone(),
-                    Stroke::new((paved_px - 2.0 * edge_px).max(1.0), color32(surface, 1.0)),
+                // dark casing → white edge lines peeking at both sides →
+                // asphalt body: a clean map-style road with round joins
+                painter.add(egui::Shape::line(pts.clone(), Stroke::new(paved_px + 2.4, color32(casing, 1.0))));
+                if paved_px >= 6.0 {
+                    painter.add(egui::Shape::line(pts.clone(), Stroke::new(paved_px, color32(MARKING_WHITE, 0.95))));
+                    painter.add(egui::Shape::line(pts.clone(), Stroke::new(paved_px - 1.8, color32(surface, 1.0))));
+                } else {
+                    painter.add(egui::Shape::line(pts.clone(), Stroke::new(paved_px, color32(surface, 1.0))));
+                }
+            }
+
+            // ---------- junction pads (under markings) ----------
+            // egui::Shape::convex_polygon fans the point list, so concave
+            // outlines (roundabouts, 6-leg junctions) rendered broken — fill
+            // the CONVEX HULL in the road-surface colour instead.
+            for (ji, j) in junctions.iter().enumerate() {
+                let selected = app.sel_junction == Some(ji);
+                let outline_px: Vec<Pos2> = j
+                    .outline
+                    .iter()
+                    .map(|(x, z)| app.plan_to_screen(Vec2::new(*x, *z), &rect))
+                    .collect();
+                if outline_px.len() < 3 {
+                    continue;
+                }
+                let hull = convex_hull(outline_px);
+                let pad = if selected { color32([96, 118, 96], 1.0) } else { color32(ASPHALT, 1.0) };
+                painter.add(egui::Shape::convex_polygon(
+                    hull,
+                    pad,
+                    Stroke::new(1.0, Color32::from_rgb(0x28, 0x2a, 0x2e)),
                 ));
-                // center markings
-                if c.is_oneway() {
-                    draw_dashed(&painter, &pts, color32(MARKING_WHITE, 0.9), 1.2, (8.0, 8.0));
-                } else if !c.points.iter().any(|p| p.dirt) {
-                    painter.add(egui::Shape::line(pts.clone(), Stroke::new(1.2, color32(MARKING_YELLOW, 0.95))));
+                // roundabout island
+                if let Some((ix, iz, ir)) = j.island {
+                    let c = app.plan_to_screen(Vec2::new(ix, iz), &rect);
+                    let r_px = (ir * app.plan.scale) as f32;
+                    painter.circle_filled(c, r_px, color32([86, 138, 90], 1.0));
+                    painter.circle_stroke(c, r_px, Stroke::new(1.0, Color32::from_rgb(0x2e, 0x4a, 0x30)));
+                }
+            }
+
+            // ---------- curves, PASS 2: markings + labels ----------
+            for (ci, c) in curves.iter().enumerate() {
+                if !c.visible || c.points.is_empty() {
+                    continue;
+                }
+                let center = c.centerline(4.0);
+                if center.len() < 2 {
+                    continue;
+                }
+                let pts: Vec<Pos2> = center
+                    .iter()
+                    .map(|p| app.plan_to_screen(Vec2::new(p.x as f64, p.z as f64), &rect))
+                    .collect();
+                let paved_px = (c.paved_width() * app.plan.scale).max(1.5) as f32;
+                let selected = (app.sel.map(|(s, _)| s == ci).unwrap_or(false) || app.sel_container == Some(ci))
+                    && app.sel_junction.is_none();
+
+                // center markings (skip when the road is only a few px wide)
+                if paved_px >= 3.0 {
+                    if c.is_oneway() {
+                        draw_dashed(&painter, &pts, color32(MARKING_WHITE, 0.9), 1.1, (8.0, 8.0));
+                    } else if !c.points.iter().any(|p| p.dirt) {
+                        painter.add(egui::Shape::line(pts.clone(), Stroke::new(1.1, color32(MARKING_YELLOW, 0.95))));
+                    }
                 }
                 // median stripe when the cross-section has one
                 let median_w = c.points.iter().map(|p| p.median).fold(0.0f64, f64::max);
@@ -128,10 +187,11 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             }
 
             // ---------- AI lane overlays (GRG draw_lanes_editor) ----------
-            // after roads, before points: each lane polyline with direction
-            // arrowheads so the travel way reads at a glance.
+            // after markings, before point handles; only when really zoomed
+            // in — at plan scale the arrowheads buried the whole map in
+            // green noise (the old "messy vector" look)
             let mut lanes_drawn = false;
-            if app.render.show_lanes {
+            if app.render.show_lanes && app.plan.scale >= 1.6 {
                 for (ci, c) in curves.iter().enumerate() {
                     if !c.visible || !c.draw_lanes_editor || !c.generate_ai_lanes {
                         continue;
@@ -198,32 +258,13 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 }
             }
 
-            // ---------- junctions (auto-detected) ----------
+            // ---------- junction labels + signal overlays ----------
             for (ji, j) in junctions.iter().enumerate() {
                 let selected = app.sel_junction == Some(ji);
-                let outline_px: Vec<Pos2> = j
-                    .outline
-                    .iter()
-                    .map(|(x, z)| app.plan_to_screen(Vec2::new(*x, *z), &rect))
-                    .collect();
-                if outline_px.len() < 3 {
+                let c = app.plan_to_screen(Vec2::new(j.x, j.z), &rect);
+                if !rect.contains(c) {
                     continue;
                 }
-                let fill = if selected { color32([120, 160, 120], 0.95) } else { color32([84, 88, 96], 0.98) };
-                painter.add(egui::Shape::convex_polygon(
-                    outline_px.clone(),
-                    fill,
-                    Stroke::new(1.0, Color32::from_rgb(0x33, 0x36, 0x33)),
-                ));
-                // roundabout island
-                if let Some((ix, iz, ir)) = j.island {
-                    let c = app.plan_to_screen(Vec2::new(ix, iz), &rect);
-                    let r_px = (ir * app.plan.scale) as f32;
-                    painter.circle_filled(c, r_px, color32([86, 138, 90], 1.0));
-                    painter.circle_stroke(c, r_px, Stroke::new(1.0, Color32::from_rgb(0x2e, 0x4a, 0x30)));
-                }
-                // label
-                let c = app.plan_to_screen(Vec2::new(j.x, j.z), &rect);
                 painter.text(
                     Pos2::new(c.x, c.y - 10.0),
                     egui::Align2::CENTER_BOTTOM,
@@ -285,15 +326,17 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 }
             }
 
-            // ---------- props ----------
-            for p in &props {
-                let sp = app.plan_to_screen(Vec2::new(p.pos.x as f64, p.pos.z as f64), &rect);
-                if !rect.contains(sp) {
-                    continue;
+            // ---------- props (small quiet dots — 541 of them used to be
+            // loud confetti) ----------
+            if app.plan.scale >= 0.1 {
+                for p in &props {
+                    let sp = app.plan_to_screen(Vec2::new(p.pos.x as f64, p.pos.z as f64), &rect);
+                    if !rect.contains(sp) {
+                        continue;
+                    }
+                    let c = asset_marker_color(&p.asset);
+                    painter.circle_filled(sp, 2.2, color32(c, 0.85));
                 }
-                let c = asset_marker_color(&p.asset);
-                painter.circle_filled(sp, 3.5, color32(c, 0.95));
-                painter.circle_stroke(sp, 3.5, Stroke::new(0.8, Color32::from_black_alpha(120)));
             }
 
             // ---------- point handles (LOGICAL PIXELS — crisp) ----------
@@ -662,4 +705,36 @@ fn draw_dashed(painter: &egui::Painter, pts: &[Pos2], color: Color32, width: f32
         cursor = b;
         let _ = seg_start;
     }
+}
+
+/// Monotone-chain convex hull — egui's convex_polygon fans the raw point
+/// list, so concave junction outlines (roundabouts, multi-leg pads) used to
+/// fill as broken bowties. Filling the hull keeps the pad clean.
+fn convex_hull(mut pts: Vec<Pos2>) -> Vec<Pos2> {
+    pts.sort_by(|a, b| {
+        a.x.partial_cmp(&b.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    pts.dedup();
+    if pts.len() < 3 {
+        return pts;
+    }
+    let cross = |o: &Pos2, a: &Pos2, b: &Pos2| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let mut hull: Vec<Pos2> = Vec::with_capacity(2 * pts.len() + 1);
+    for p in &pts {
+        while hull.len() >= 2 && cross(&hull[hull.len() - 2], &hull[hull.len() - 1], p) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(*p);
+    }
+    let lower = hull.len() + 1;
+    for p in pts.iter().rev() {
+        while hull.len() >= lower && cross(&hull[hull.len() - 2], &hull[hull.len() - 1], p) <= 0.0 {
+            hull.pop();
+        }
+        hull.push(*p);
+    }
+    hull.pop();
+    hull
 }

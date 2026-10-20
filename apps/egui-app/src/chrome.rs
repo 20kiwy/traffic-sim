@@ -352,10 +352,10 @@ pub fn control_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
                                 .fill(t.accent_strong)
                                 .min_size(egui::vec2(64.0, 23.0)),
                         )
-                        .on_hover_text("Parse + run the .gd script (F5)")
+                        .on_hover_text("Rebuild the loaded scene — or run the .gd script when no city is loaded (F5)")
                         .clicked()
                     {
-                        let _ = actions::perform(app, "run_script");
+                        let _ = actions::perform(app, "rebuild_or_run");
                     }
                     ui.separator();
                     if egui_kit::btn(ui, "Fit", false).on_hover_text("Fit the scene in view (F)").clicked() {

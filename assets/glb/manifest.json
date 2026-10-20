@@ -215,6 +215,24 @@
    "file": "assets/glb/palm.glb",
    "bytes": 19584,
    "role": "roadside vegetation \u2014 coconut palm"
+  },
+  {
+   "id": "cone",
+   "file": "assets/glb/cone.glb",
+   "bytes": 7648,
+   "role": "workzone \u2014 traffic cone"
+  },
+  {
+   "id": "barrel",
+   "file": "assets/glb/barrel.glb",
+   "bytes": 15536,
+   "role": "workzone \u2014 channelizer drum"
+  },
+  {
+   "id": "attenuator",
+   "file": "assets/glb/attenuator.glb",
+   "bytes": 11164,
+   "role": "workzone \u2014 impact attenuator"
   }
  ]
 }

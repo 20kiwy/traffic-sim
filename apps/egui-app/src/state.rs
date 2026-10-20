@@ -266,6 +266,10 @@ pub struct RoadkitApp {
     pub cursor_world: Option<[f64; 3]>,
     /// the Dar es Salaam (JICA + OSM) scenario is loaded
     pub dsm_loaded: bool,
+    /// the site the DSM was loaded around (None = full corridor) — lets
+    /// ▶ Run / F5 REBUILD the city instead of silently swapping it for the
+    /// bundled .gd demo (the "3D window shows a demo road" bug)
+    pub dsm_site_req: Option<(f64, f64)>,
 
     pub panels: Panels,
     /// active dock tab (must be one of the open ones)
@@ -466,6 +470,7 @@ impl RoadkitApp {
             sel_light: None,
             cursor_world: None,
             dsm_loaded: false,
+            dsm_site_req: None,
             panels: Panels::default(),
             dock_tab: DockTab::Layers,
             dock_collapsed: false,
@@ -515,8 +520,12 @@ impl RoadkitApp {
             app.dock_tab = p;
         }
         // First impression: build the demo scene so GLB props are already
-        // joined along the road when the app opens.
-        app.run_script();
+        // joined along the road when the app opens. SKIPPED for deep links
+        // (?scene=…) — the DSM install below replaces the scene anyway, and
+        // building the demo first wasted ~1 s of web boot.
+        if cfg.dsm_site.is_none() && !cfg.dsm {
+            app.run_script();
+        }
         if let Some((sx, sz)) = cfg.dsm_site {
             app.load_dsm_at(sx, sz);
             if cfg.dsm_radius > 0.0 {
@@ -778,6 +787,7 @@ impl RoadkitApp {
     /// traffic). Replaces the current scene.
     pub fn load_dsm(&mut self) {
         let dsm = roadkit::build_dsm();
+        self.dsm_site_req = None;
         self.install_dsm(dsm, "Dar es Salaam loaded");
     }
 
@@ -785,7 +795,29 @@ impl RoadkitApp {
     /// only the curves within ~700 m of the site, site at the origin.
     pub fn load_dsm_at(&mut self, sx: f64, sz: f64) {
         let dsm = roadkit::build_dsm_local((sx, sz), 700.0);
+        self.dsm_site_req = Some((sx, sz));
         self.install_dsm(dsm, "Dar es Salaam site loaded");
+    }
+
+    /// ▶ Run / F5 semantics: with a DSM scenario loaded, Rebuilding beats
+    /// replacing — the bundled demo script used to silently swap the whole
+    /// city for a 3-point demo road (the "3D window shows a demo" bug).
+    /// Any OTHER script still runs normally (explicit user intent).
+    pub fn run_script_or_rebuild(&mut self) {
+        if self.dsm_loaded && self.script_src == crate::scripts::default_source() {
+            match self.dsm_site_req {
+                Some((sx, sz)) => {
+                    let dsm = roadkit::build_dsm_local((sx, sz), 700.0);
+                    self.install_dsm(dsm, "Dar es Salaam site reloaded");
+                }
+                None => self.load_dsm(),
+            }
+            self.status =
+                "Dar es Salaam reloaded — ▶ Run rebuilds the loaded city; pick a script in the Script dock to build something else"
+                    .to_string();
+            return;
+        }
+        self.run_script();
     }
 
     /// Install a DsmScene into the app (curves + props + enrichment +
@@ -856,12 +888,16 @@ impl RoadkitApp {
             (min_z + max_z) / 2.0,
         );
         self.cam.target = gdmath::Vec3::new(-cx as f32, 0.0, -cz as f32);
-        self.cam.dist = 620.0;
-        self.cam.pitch = 0.62;
+        // closeup (site deep links): fill the frame with the interchange —
+        // 620 m used to show the whole reach circle with the junction as a
+        // thin sliver in the middle (the "3D looks broken" web bug)
+        let closeup = self.dsm_site_req.is_some();
+        self.cam.dist = if closeup { 430.0 } else { 620.0 };
+        self.cam.pitch = if closeup { 0.5 } else { 0.62 };
         self.cam.yaw = 0.65;
         self.plan.cx = 0.0;
         self.plan.cz = 0.0;
-        self.plan.scale = 0.55;
+        self.plan.scale = if closeup { 0.8 } else { 0.55 };
     }
 
     /// World-space plan transform helpers.
@@ -1713,7 +1749,9 @@ impl eframe::App for RoadkitApp {
 
         // global shortcuts
         if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
-            self.run_script();
+            // F5 on a loaded DSM scene REBUILDS it (a bare run_script() used
+            // to swap the whole city for the bundled 3-point demo road)
+            self.run_script_or_rebuild();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.any()) {
             self.fit_scene();

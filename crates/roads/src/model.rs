@@ -538,8 +538,32 @@ pub struct RoadCurve {
     /// (flyover approaches, embankments, BRT corridors — logic-restricted,
     /// set explicitly by the scenario builders)
     pub guardrail: bool,
+    /* ---- R12 RoadArchitect GSDTunnel ---- */
+    /// R12 RoadArchitect GSDTunnel: enclose the road in an arch vault with
+    /// portal faces + interior strip lights
+    pub tunnel: bool,
+    /// R12 RA bridge kit style: standard deck (Girder/BoxGirder), semi-arch
+    /// (BridgeBase6/7/8) or suspension (cables + hangers + towers)
+    pub bridge_style: BridgeStyle,
+    /// R12 RA GSDCableBarrier: flexible posts + 3 steel cables in the median
+    pub cable_barrier: bool,
     /* ---- GRG RoadContainer: Internal data ---- */
     pub debug: bool,
+}
+
+/// RoadArchitect bridge kit families (Editor/Library/B): GSDBridgeBase-*
+/// girder decks, the semi-arch kit and the suspension kit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BridgeStyle {
+    /// deck on piers (default — existing underside/piers geometry)
+    #[default]
+    Girder,
+    /// box girder deck (Tazara Fig 5.3.10 style, deeper underside)
+    BoxGirder,
+    /// semi-arch rib + spandrel columns under the deck
+    Arch,
+    /// suspension: towers + catenary main cables + vertical hangers
+    Suspension,
 }
 
 impl Default for RoadCurve {
@@ -562,6 +586,9 @@ impl Default for RoadCurve {
             draw_lanes_game: false,
             create_edge_curves: false,
             guardrail: false,
+            tunnel: false,
+            bridge_style: BridgeStyle::Girder,
+            cable_barrier: false,
             debug: false,
         }
     }

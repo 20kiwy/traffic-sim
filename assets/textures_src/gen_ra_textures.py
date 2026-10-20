@@ -24,6 +24,12 @@ FILES = {
     "ra_railing": "GSDRailing4_Diffuse.png",
     "ra_brick": "GSDBrickRoad_Diffuse.png",
     "ra_cobble": "GSDCobblestoneRoad_Diffuse.png",
+    # R12 additions (tunnel portals / bridge kits / dirt roads). NOTE:
+    # GSDDirtRoad_Diffuse.png is actually a JPEG with a .png name — PIL
+    # sniffs the real format, so it opens fine.
+    "ra_concrete2": "GSDConcrete2_Diffuse.png",
+    "ra_concrete3": "GSDConcrete3_Diffuse.png",
+    "ra_dirt": "GSDDirtRoad_Diffuse.png",
 }
 
 

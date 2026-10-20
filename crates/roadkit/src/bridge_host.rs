@@ -9,7 +9,7 @@
 use gdscript::{GodotObject, Interpreter, Value, Vec3Val, CtorFn};
 use crate::{join_along, stamp, JoinParams, PropInstance};
 use roads::junction::{detect, weld_endpoints, Junction, JunctionKind, JunctionSettings};
-use roads::model::{Alignment, LaneDir, RoadCurve, RoadPoint, TrafficUpdate};
+use roads::model::{Alignment, BridgeStyle, LaneDir, RoadCurve, RoadPoint, TrafficUpdate};
 use roads::terrain::TerrainState;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -487,6 +487,16 @@ impl GodotObject for RoadCurveObj {
             "draw_lanes_editor" => Value::Bool(self.curve.draw_lanes_editor),
             "draw_lanes_game" => Value::Bool(self.curve.draw_lanes_game),
             "create_edge_curves" => Value::Bool(self.curve.create_edge_curves),
+            // ---- R12 RoadArchitect systems ----
+            "guardrail" => Value::Bool(self.curve.guardrail),
+            "tunnel" => Value::Bool(self.curve.tunnel),
+            "cable_barrier" => Value::Bool(self.curve.cable_barrier),
+            "bridge_style" => Value::str(match self.curve.bridge_style {
+                BridgeStyle::Girder => "girder",
+                BridgeStyle::BoxGirder => "box_girder",
+                BridgeStyle::Arch => "arch",
+                BridgeStyle::Suspension => "suspension",
+            }),
             "debug" => Value::Bool(self.curve.debug),
             _ => return None,
         })
@@ -509,6 +519,29 @@ impl GodotObject for RoadCurveObj {
             "draw_lanes_editor" => self.curve.draw_lanes_editor = v.truthy(),
             "draw_lanes_game" => self.curve.draw_lanes_game = v.truthy(),
             "create_edge_curves" => self.curve.create_edge_curves = v.truthy(),
+            // ---- R12 RoadArchitect systems ----
+            "guardrail" => self.curve.guardrail = v.truthy(),
+            "tunnel" => self.curve.tunnel = v.truthy(),
+            "cable_barrier" => self.curve.cable_barrier = v.truthy(),
+            "bridge_style" => {
+                let Some(s) = v.as_str() else {
+                    return Err(
+                        "bridge_style expects a string: girder | box | boxgirder | arch | suspension"
+                            .into(),
+                    );
+                };
+                self.curve.bridge_style = match s.to_lowercase().as_str() {
+                    "girder" => BridgeStyle::Girder,
+                    "box" | "boxgirder" => BridgeStyle::BoxGirder,
+                    "arch" => BridgeStyle::Arch,
+                    "suspension" => BridgeStyle::Suspension,
+                    other => {
+                        return Err(format!(
+                            "bridge_style '{other}' unknown — use girder | box | boxgirder | arch | suspension"
+                        ))
+                    }
+                };
+            }
             "debug" => self.curve.debug = v.truthy(),
             other => return Err(format!("RoadCurve has no property '{other}'")),
         }

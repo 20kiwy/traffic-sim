@@ -28,7 +28,8 @@ static ACTIONS: &[ActionDef] = &[
     ActionDef { id: "tool_stamp", label: "Stamp selected GLB prop", location: "tool rail", hotkey: Some("P") },
     ActionDef { id: "tool_pan", label: "Pan the 2D plan", location: "tool rail", hotkey: Some("H") },
     // script + scene
-    ActionDef { id: "run_script", label: "Run the .gd script", location: "control bar ▶ Run / Script menu / tool rail", hotkey: Some("F5") },
+    ActionDef { id: "run_script", label: "Run the .gd script", location: "Script menu / Script dock", hotkey: Some("F5") },
+    ActionDef { id: "rebuild_or_run", label: "Rebuild the loaded scene (or run the demo script)", location: "control bar ▶ Run", hotkey: Some("F5") },
     ActionDef { id: "reset_scene", label: "Reset scene (clear everything)", location: "Script menu / Script panel", hotkey: None },
     ActionDef { id: "join_props", label: "Join GLB props like Godot (bulk dressing)", location: "Props menu / Assets panel", hotkey: None },
     ActionDef { id: "clear_props", label: "Clear all placed GLB props", location: "Props menu / Assets panel", hotkey: None },
@@ -121,6 +122,17 @@ pub fn perform(app: &mut RoadkitApp, id: &str) -> Result<String, String> {
             out = match &app.script_status {
                 ScriptStatus::Ok(m) => format!("script OK — {m}"),
                 ScriptStatus::Err(e) => return Err(format!("script failed: {e}")),
+                ScriptStatus::Idle => "idle".into(),
+            };
+        }
+        // app-bar ▶ Run: rebuild what's on screen — with a DSM scenario
+        // loaded, running the bundled demo script used to silently swap the
+        // whole city for a 3-point demo road
+        "rebuild_or_run" => {
+            app.run_script_or_rebuild();
+            out = match &app.script_status {
+                ScriptStatus::Ok(m) => format!("scene OK — {m}"),
+                ScriptStatus::Err(e) => return Err(format!("build failed: {e}")),
                 ScriptStatus::Idle => "idle".into(),
             };
         }

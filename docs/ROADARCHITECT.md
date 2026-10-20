@@ -210,3 +210,21 @@ the CPU rasterizer (`roadkit::raster::ShadeMode`):
 (hidden-line depth fill + edges), **`ShadedWire`** (solid + edge overlay),
 **`Depth`** (grayscale view-z), **`Quality`** (2× SSAA supersampled Solid).
 CLI: `--shade <mode>` on every render path; egui toolbar chips mirror it.
+
+---
+
+## 11. R12 — 100% coverage pass
+
+The remaining RA systems landed; nothing in the visual stack is stubbed any more:
+
+| RA system (source) | RU |
+|---|---|
+| GSDTunnel-2L/4L/6L + caps + lights (Mesh/RoadObj/Tunnel) | `mesh3d::tunnel_parts` — flag `RoadCurve.tunnel`, portal faces + crown strip lights |
+| Suspension kit (cables every 5 m @±16.5 m) | `mesh3d::suspension_parts` — `RoadCurve.bridge_style = Suspension` (Selanda bridge) |
+| Semi-arch kit (BridgeBase6/7/8-*40M) | `mesh3d::arch_parts` — `bridge_style = Arch` |
+| GSDCableBarrier (-Light/-Pole) | `mesh3d::cable_barrier_parts` — `RoadCurve.cable_barrier` on medians ≥ 2 m |
+| TrafficCone / Barrels / GSDAtten (Interactive) | GLB props `cone` / `barrel` / `attenuator` (gen_roadwork.py), stamped in the Igesa BRT Phase-4 workzone |
+| GSDConcrete2/3, GSDDirtRoad materials | RKTX slots 17–19 (`ra_concrete2/3`, `ra_dirt`) |
+| (parity note) GSDRigidBody physics | intentionally replaced by `simflow` lane-graph movement — RA's rigidbody props are for Unity physics demos, not road generation |
+
+Conversion coverage: **100% of the visual/generation stack** (roads, intersections, bridges incl. special kits, tunnels, extrusions, edge objects, traffic lights, terrain, textures, props). Physics is a deliberate paradigm swap, editor tooling is re-imagined as the egui app + .gd bridge.

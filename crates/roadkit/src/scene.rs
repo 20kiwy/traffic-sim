@@ -226,11 +226,30 @@ pub fn build_scene_enriched(
     for c in curves {
         // per-curve assembly: build_parts covers surface + gutters +
         // piers; R10 adds bridge formwork (railing/abutments) and the
-        // TANROADS roadside drains
-        let mut mesh: Vec<roads::mesh3d::MeshPart> = build_parts(c, MeshQuality { markings: true, sample_m: 4.0 });
+        // TANROADS roadside drains. wasm CPU budget: coarser road sampling
+        // halves the per-frame vertex transform cost (the software raster
+        // re-transforms every vertex every frame — 4 m sampling put web
+        // closeups at ~110 ms/frame).
+        let mut mesh: Vec<roads::mesh3d::MeshPart> = build_parts(
+            c,
+            MeshQuality {
+                markings: true,
+                #[cfg(target_arch = "wasm32")]
+                sample_m: 8.0,
+                #[cfg(not(target_arch = "wasm32"))]
+                sample_m: 4.0,
+            },
+        );
         mesh.extend(roads::mesh3d::railing_parts(c));
         mesh.extend(roads::mesh3d::abutment_parts(c));
         mesh.extend(roads::mesh3d::drain_parts(c));
+        // R12 RoadArchitect systems: GSDTunnel vault, suspension/semi-arch
+        // bridge kits and the median cable barrier (all flag-gated — each
+        // returns an empty vec when its RoadCurve flag is off)
+        mesh.extend(roads::mesh3d::tunnel_parts(c, MeshQuality { markings: true, sample_m: 4.0 }));
+        mesh.extend(roads::mesh3d::suspension_parts(c));
+        mesh.extend(roads::mesh3d::arch_parts(c));
+        mesh.extend(roads::mesh3d::cable_barrier_parts(c));
         for part in mesh {
             tris += if part.indices.is_empty() {
                 part.positions.len() / 3
@@ -1121,7 +1140,73 @@ fn draw_all(
     let proj = cam.proj(frame.w as f32 / frame.h.max(1) as f32);
     let light = Vec3::new(0.4, 0.85, 0.3).normalized();
     let eye = cam.eye();
+
+    // R12 perf: frustum culling (Gribb–Hartmann planes from the view-proj).
+    // The CPU raster used to transform EVERY vertex of the whole corridor
+    // each frame — on wasm a Kijazi closeup sat at ~125 ms/frame. Parts and
+    // props fully outside the frustum are skipped before draw_mesh.
+    let vp = proj.mul(&view);
+    let row = |i: usize| (vp.m[i * 4], vp.m[i * 4 + 1], vp.m[i * 4 + 2], vp.m[i * 4 + 3]);
+    let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
+    let mut planes = [
+        (r3.0 + r0.0, r3.1 + r0.1, r3.2 + r0.2, r3.3 + r0.3), // left
+        (r3.0 - r0.0, r3.1 - r0.1, r3.2 - r0.2, r3.3 - r0.3), // right
+        (r3.0 + r1.0, r3.1 + r1.1, r3.2 + r1.2, r3.3 + r1.3), // bottom
+        (r3.0 - r1.0, r3.1 - r1.1, r3.2 - r1.2, r3.3 - r1.3), // top
+        (r3.0 + r2.0, r3.1 + r2.1, r3.2 + r2.2, r3.3 + r2.3), // near
+        (r3.0 - r2.0, r3.1 - r2.1, r3.2 - r2.2, r3.3 - r2.3), // far
+    ];
+    for pl in &mut planes {
+        let len = (pl.0 * pl.0 + pl.1 * pl.1 + pl.2 * pl.2).sqrt();
+        if len > 1e-6 {
+            pl.0 /= len;
+            pl.1 /= len;
+            pl.2 /= len;
+            pl.3 /= len;
+        }
+    }
+    // sphere (centroid + radius) vs the 6 planes — outside any one ⇒ reject
+    let outside = |cx: f32, cy: f32, cz: f32, r: f32| {
+        planes.iter().any(|pl| pl.0 * cx + pl.1 * cy + pl.2 * cz + pl.3 < -r)
+    };
+
     for part in scene.ground.iter().chain(scene.parts.iter()) {
+        // coarse bounds from a strided sample (the parts are per-strip, so a
+        // 1-in-12 sample bounds the sphere tightly enough to cull)
+        let n = part.positions.len();
+        if n == 0 {
+            continue;
+        }
+        // ~24 samples bound the sphere tightly enough to cull
+        let step = (n / 24).max(1);
+        let mut sx = 0.0f32;
+        let mut sy = 0.0f32;
+        let mut sz = 0.0f32;
+        let mut cnt = 0usize;
+        let mut i = 0;
+        while i < n {
+            sx += part.positions[i].x;
+            sy += part.positions[i].y;
+            sz += part.positions[i].z;
+            cnt += 1;
+            i += step;
+        }
+        let (cx, cy, cz) = (sx / cnt as f32, sy / cnt as f32, sz / cnt as f32);
+        let mut r2 = 0.0f32;
+        let mut j = 0;
+        while j < n {
+            let p = &part.positions[j];
+            let dx = p.x - cx;
+            let dy = p.y - cy;
+            let dz = p.z - cz;
+            r2 = r2.max(dx * dx + dy * dy + dz * dz);
+            j += step;
+        }
+        // sampled radius can undershoot — pad 25 %
+        let r = r2.sqrt() * 1.25;
+        if outside(cx, cy, cz, r) {
+            continue;
+        }
         let tex = textures.get(part.tex);
         let uvs = if tex.is_some() { Some(&part.uv[..]) } else { None };
         let cols = if part.vcolors.is_empty() {
@@ -1147,6 +1232,12 @@ fn draw_all(
         let Some(entry) = library.entries.get(pd.asset) else {
             continue;
         };
+        // prop bounds: translation + a generous 12 m world radius (masts,
+        // buses and buildings all fit); a fully off-frustum prop is skipped
+        let (px, py, pz) = (pd.model.m[3], pd.model.m[7], pd.model.m[11]);
+        if outside(px, py, pz, 12.0) {
+            continue;
+        }
         let tex = if pd.tex >= 0 { textures.get(pd.tex) } else { None };
         for prim in &entry.mesh.prims {
             let uvs = if tex.is_some() && !prim.uvs.is_empty() {

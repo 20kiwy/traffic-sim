@@ -185,8 +185,20 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             }
 
             let avail = ui.available_size();
+            // layout size (logical points) — always full, the texture blit
+            // stretches over it
             let w = avail.x.max(240.0).min(2560.0) as usize;
             let h = avail.y.max(180.0).min(1600.0) as usize;
+            // wasm CPU raster: render BELOW the layout size and let the LINEAR
+            // texture blit stretch — at full 1600×900 backing the web preview
+            // hit ~136 ms/frame (1 fps) which read as "the 3D window broken".
+            // 0.62× ≈ 2.6× fewer pixels; native keeps 1:1.
+            #[cfg(target_arch = "wasm32")]
+            let raster_scale = 0.55f32;
+            #[cfg(not(target_arch = "wasm32"))]
+            let raster_scale = 1.0f32;
+            let rw = ((w as f32 * raster_scale) as usize).max(160).min(1400);
+            let rh = ((h as f32 * raster_scale) as usize).max(120).min(900);
 
             if app.render.spin {
                 app.cam.yaw += 0.006;
@@ -298,8 +310,8 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     &app.assets,
                     &app.textures,
                     &app.cam,
-                    w,
-                    h,
+                    rw,
+                    rh,
                     env,
                     &extra,
                     app.render.show_props,
@@ -317,7 +329,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             if cache_hit {
                 // reuse the uploaded texture — zero raster work this frame
             } else {
-                let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+                let img = egui::ColorImage::from_rgba_unmultiplied([rw, rh], &rgba);
                 let tex = app.render.tex.get_or_insert_with(|| {
                     ctx.load_texture("viewport3d", img.clone(), egui::TextureOptions::LINEAR)
                 });

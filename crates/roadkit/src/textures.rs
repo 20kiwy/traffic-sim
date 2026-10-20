@@ -102,6 +102,9 @@ pub const TEX_RA_RAILING: i32 = 13;
 pub const TEX_RA_BRICK: i32 = 14;
 pub const TEX_RA_COBBLE: i32 = 15;
 pub const TEX_WINDOWS: i32 = 16;
+pub const TEX_RA_CONCRETE2: i32 = 17;
+pub const TEX_RA_CONCRETE3: i32 = 18;
+pub const TEX_RA_DIRT: i32 = 19;
 
 #[derive(Default)]
 pub struct TextureLibrary {
@@ -118,6 +121,8 @@ impl TextureLibrary {
             // RoadArchitect set (R11)
             "ra_asphalt", "ra_concrete", "ra_galv", "ra_wbeam",
             "ra_railing", "ra_brick", "ra_cobble", "windows",
+            // RoadArchitect set (R12)
+            "ra_concrete2", "ra_concrete3", "ra_dirt",
         ];
         let mut lib = Self::default();
         for name in names {
@@ -150,14 +155,16 @@ impl TextureLibrary {
     /// road mesh texture slots stay valid.
     #[cfg(target_arch = "wasm32")]
     pub fn load_embedded() -> Self {
-        const NAMES: [&str; 17] = [
+        const NAMES: [&str; 20] = [
             "road_trim", "grass", "sidewalk", "median", "asphalt",
             "cement", "mud", "rough", "red_tactile",
             // RoadArchitect set (R11)
             "ra_asphalt", "ra_concrete", "ra_galv", "ra_wbeam",
             "ra_railing", "ra_brick", "ra_cobble", "windows",
+            // RoadArchitect set (R12)
+            "ra_concrete2", "ra_concrete3", "ra_dirt",
         ];
-        const BYTES: [&[u8]; 17] = [
+        const BYTES: [&[u8]; 20] = [
             include_bytes!("../../../assets/textures/road_trim.raw"),
             include_bytes!("../../../assets/textures/grass.raw"),
             include_bytes!("../../../assets/textures/sidewalk.raw"),
@@ -175,6 +182,9 @@ impl TextureLibrary {
             include_bytes!("../../../assets/textures/ra_brick.raw"),
             include_bytes!("../../../assets/textures/ra_cobble.raw"),
             include_bytes!("../../../assets/textures/windows.raw"),
+            include_bytes!("../../../assets/textures/ra_concrete2.raw"),
+            include_bytes!("../../../assets/textures/ra_concrete3.raw"),
+            include_bytes!("../../../assets/textures/ra_dirt.raw"),
         ];
         let mut lib = Self::default();
         for (name, bytes) in NAMES.iter().zip(BYTES.iter()) {
