@@ -12,10 +12,17 @@
 //!   axis (Fig 5.2.20: turning BRT passes BETWEEN the two decks),
 //!   quadrant left-slip ramps, U-turn + Dala Dala terminal signals.
 //! - **Tazara Intersection** — Nyerere × Nelson Mandela: JICA §5.3 —
-//!   the 540 m nose-to-nose Nelson Mandela flyover (250 m bridge,
-//!   160/130 m approaches, two 2-lane carriageways, 4 % grade,
-//!   Fig 5.3.10), 1L/2TH/1R approaches with right-turn bays + left
-//!   slip ramps, 4-phase 120 s signal (G20/Y3/AR2, Fig 5.3.2).
+//!   the Fig 5.3.10 concept design flyover: 300 m bridge (2 × 45 m PC
+//!   hollow slabs + 120 m PC box girder over Nyerere) on approaches of
+//!   137.303 m (W) / 175.408 m (E), grades 1.1→3.5→5→4→1.1 %, crown
+//!   7 m; two 2-lane decks 17 m total (§5.3.5). At-grade level keeps
+//!   Fig 5.3.11's plan: service roads, bus lanes + zebra bars on the
+//!   Nyerere approaches, right-turn lanes under the flyover, BRT
+//!   Phase-2 median busway, 4-phase 120 s signal (G20/Y3/AR2).
+//! - **Fig 5.5.1 priority set** — Gerezani/Bandari (Kilwa widening +
+//!   34 m six-lane Bandari + BRT-only flyover 260 m over Nyerere),
+//!   Mwenge, Morocco, Magomeni, Chang'Ombe, Selanda Bridge and the
+//!   Mandela Ring East junctions, each with JICA turn lanes + signals.
 //! - **Sam Nujoma × Igesa (Sinza)** — channelized at-grade crossroad
 //!   with a 2-phase signal (BRT Phase 4 corridor).
 //!
@@ -49,6 +56,16 @@ const M_PER_DEG_LAT: f64 = 110_574.0;
 const TAZARA: (f64, f64) = (3261.0, 8647.0);
 /// Sam Nujoma × Igesa junction (Sinza).
 const IGESA_XZ: (f64, f64) = (1680.0, -1592.0);
+/// Fig 5.5.1 priority sites (scene metres, same anchor as Kijazi):
+/// estimated from the report map + OSM bearings.
+const MWENGE: (f64, f64) = (2907.0, -1912.0); // Sam Nujoma × New Bagamoyo
+const MOROCCO: (f64, f64) = (1658.0, 165.0); // Morogoro × Morocco
+const MAGOMENI: (f64, f64) = (3427.0, 464.0); // Morogoro × Magomeni
+const CHANGOMBE: (f64, f64) = (3870.0, 6191.0); // Nyerere × Chang'ombe
+const GEREZANI: (f64, f64) = (4418.0, 6303.0); // Nyerere × Bandari (BRT flyover)
+const BANDARI_PORT: (f64, f64) = (5184.0, 5418.0); // Bandari × Sokoine (port)
+const SELANDA: (f64, f64) = (8735.0, 8393.0); // Mandela × Kilwa (Selanda Br)
+const MANDELA_E: (f64, f64) = (6900.0, 8520.0); // Mandela Ring East link
 
 fn ll2m(lon: f64, lat: f64) -> (f64, f64) {
     ((lon - LON0) * M_PER_DEG_LON, -(lat - LAT0) * M_PER_DEG_LAT)
@@ -236,12 +253,21 @@ pub fn build_dsm() -> DsmScene {
     tazara_overlay(&mut curves, &mut registry);
     /* ---- 4. JICA overlay: Sam Nujoma × Igesa ---- */
     igesa_overlay(&mut curves, &mut registry);
+    /* ---- 5. Fig 5.5.1 priority corridors + sites ---- */
+    priority_overlay(&mut curves, &mut registry);
 
     let pois = vec![
         ("Kijazi Interchange (Ubungo)".into(), 0.0, 0.0),
         ("Ubungo BRT station (150 m W)".into(), -150.0, 0.0),
         ("Tazara Intersection".into(), TAZARA.0, TAZARA.1),
         ("Sam Nujoma × Igesa (Sinza)".into(), IGESA_XZ.0, IGESA_XZ.1),
+        ("Mwenge Intersection (Fig 5.5.1)".into(), MWENGE.0, MWENGE.1),
+        ("Morocco Intersection".into(), MOROCCO.0, MOROCCO.1),
+        ("Magomeni Intersection".into(), MAGOMENI.0, MAGOMENI.1),
+        ("Chang'Ombe Intersection".into(), CHANGOMBE.0, CHANGOMBE.1),
+        ("Gerezani / Bandari (BRT flyover)".into(), GEREZANI.0, GEREZANI.1),
+        ("Bandari Port junction".into(), BANDARI_PORT.0, BANDARI_PORT.1),
+        ("Selanda Bridge (Mandela × Kilwa)".into(), SELANDA.0, SELANDA.1),
     ];
 
     DsmScene { curves, registry, pois }
@@ -534,11 +560,169 @@ fn kijazi_overlay(curves: &mut Vec<RoadCurve>, registry: &mut SignalRegistry) {
     registry.add(0.0, 105.0, preset_two_phase(90.0)); // Dala Dala terminal
 }
 
-/* ---- Tazara overlay (JICA §5.3) ---- */
+/* ---- Tazara overlay (JICA §5.3, Fig 5.3.10 + 5.3.11) ---- */
+
+/// JICA Fig 5.3.10 concept-design flyover: full alignment with
+/// approaches and the span-driven elevation profile (bridge 300 m =
+/// 2 × 45 m hollow slabs + 120 m box girder over Nyerere; approaches
+/// 137.303 m W / 175.408 m E; grades 1.1→3.5→5→4→1.1 %; crown 7 m).
+#[allow(clippy::too_many_arguments)]
+fn flyover_jica(
+    curves: &mut Vec<RoadCurve>,
+    name: &str,
+    ax: f64,
+    az: f64,
+    bx: f64,
+    bz: f64,
+    lateral: f64,
+    lanes: usize,
+    crown: f64,
+    color: [u8; 3],
+) {
+    let dx = bx - ax;
+    let dz = bz - az;
+    let l = dx.hypot(dz).max(1e-6);
+    let (ux, uz) = (dx / l, dz / l);
+    let (px, pz) = (-uz, ux);
+    let cx = (ax + bx) / 2.0 + px * lateral;
+    let cz = (az + bz) / 2.0 + pz * lateral;
+    let half = l / 2.0;
+    let k = crown / 7.0; // profile scale (Tazara concept is 7 m)
+    // (station along the axis, elevation, on-bridge) — Fig 5.3.10 profile
+    let stations: [(f64, f64, bool); 13] = [
+        (-half, 0.0, false),                    // W nose (at grade)
+        (-half + 40.0, 0.45 * k, false),        // 1.1 % approach
+        (-half + 80.0, 0.9 * k, false),
+        (-half + 120.0, 1.45 * k, false),       // 3.5 % to bridge start
+        (-137.303, 1.5 * k, false),             // bridge start elevation
+        (-90.0, 2.9 * k, true),                 // PC hollow slab span 1
+        (-45.0, 4.3 * k, true),                 // hollow slab span 2
+        (0.0, crown, true),                     // crown — box girder over Nyerere
+        (45.0, 4.3 * k, true),
+        (90.0, 2.9 * k, true),
+        (137.303, 1.5 * k, true),               // hollow slabs east
+        (half - 40.0, 0.75 * k, false),         // 4 % → 1.1 % exit
+        (half, 0.0, false),                     // E nose
+    ];
+    let mut c = RoadCurve::new(name.to_string());
+    c.color = color;
+    c.underside_thickness = 1.1;
+    for (i, (s, e, bridge)) in stations.iter().enumerate() {
+        let mut p = RoadPoint::new(cx + ux * s, cz + uz * s);
+        p.name = format!("{}_{}", short_tag(name), i + 1);
+        p.auto_bearing = true;
+        p.lanes = lanes;
+        p.rev_lanes = 0;
+        p.oneway = true;
+        p.lane_width = roads::tanzania::LANE_RAMP;
+        p.shoulder_l = 0.6;
+        p.shoulder_r = 0.6;
+        p.layer = if *bridge { 1 } else { 0 };
+        p.bridge = *bridge;
+        p.elev = *e;
+        p.terminated = i == 0 || i == stations.len() - 1;
+        c.add_point(p);
+    }
+    curves.push(c);
+}
+
+/// Service road (JICA at-grade plan, Fig 5.3.11: "inclusion of service
+/// roads for additional capacity and land use access") — one lane each
+/// way pair parallel to the arterial, kept clear of the flyover bays.
+#[allow(clippy::too_many_arguments)]
+fn service_road(
+    curves: &mut Vec<RoadCurve>,
+    name: &str,
+    ax: f64,
+    az: f64,
+    bx: f64,
+    bz: f64,
+    offset: f64,
+    color: [u8; 3],
+) {
+    let before = curves.len();
+    dual(curves, name, ax, az, bx, bz, offset, 1, None, None, color);
+    for c in curves.iter_mut().skip(before) {
+        for p in &mut c.points {
+            p.lane_width = roads::tanzania::LANE_LOCAL;
+            p.pathway_l = 2.0;
+            p.pathway_r = 2.0;
+        }
+    }
+}
+
+/// Multi-point dual carriageway corridor (left-hand traffic): the A
+/// carriageway runs left of the forward direction, B left of the
+/// reverse. Each vertex carries optional turn strings
+/// `(a_str, b_str)`: a_str = A's FORWARD lanes at that point, b_str =
+/// B's (reverse) approach lanes there — e.g. at a crossing vertex
+/// `Some(("through|through", "left|through|right"))`.
+#[allow(clippy::too_many_arguments)]
+fn corridor_dual(
+    curves: &mut Vec<RoadCurve>,
+    name: &str,
+    pts: &[(f64, f64, Option<&str>, Option<&str>)],
+    offset: f64,
+    lanes: usize,
+    color: [u8; 3],
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    // per-vertex left normal from the local chord
+    let mut lefts: Vec<(f64, f64)> = Vec::new();
+    for i in 0..pts.len() {
+        let (px, pz) = if i == 0 {
+            (pts[1].0 - pts[0].0, pts[1].1 - pts[0].1)
+        } else if i + 1 == pts.len() {
+            (pts[i].0 - pts[i - 1].0, pts[i].1 - pts[i - 1].1)
+        } else {
+            (pts[i + 1].0 - pts[i - 1].0, pts[i + 1].1 - pts[i - 1].1)
+        };
+        let l = px.hypot(pz).max(1e-6);
+        // left of travel (x east, z south): left = (uz, -ux)
+        lefts.push((pz / l, -px / l));
+    }
+    for side in [1.0, -1.0] {
+        let mut c = RoadCurve::new(format!("{name} {}", if side > 0.0 { "A" } else { "B" }));
+        c.color = color;
+        let is_a = side > 0.0;
+        let ordered: Vec<usize> = if is_a {
+            (0..pts.len()).collect()
+        } else {
+            (0..pts.len()).rev().collect()
+        };
+        for (k, &pi) in ordered.iter().enumerate() {
+            let (x, z, a_str, b_str) = pts[pi];
+            let (lx, lz) = lefts[pi];
+            let mut p = RoadPoint::new(x + lx * offset * side, z + lz * offset * side);
+            p.name = format!("{}_{}", short_tag(name), k + 1);
+            p.auto_bearing = true;
+            p.lanes = lanes;
+            p.rev_lanes = 0;
+            p.oneway = true;
+            p.lane_width = roads::tanzania::LANE_JICA_SIXLANE;
+            p.median = 0.0;
+            p.shoulder_l = roads::tanzania::SHOULDER_ARTERIAL;
+            p.shoulder_r = roads::tanzania::SHOULDER_ARTERIAL;
+            p.pathway_l = roads::tanzania::WALK_ARTERIAL;
+            p.pathway_r = roads::tanzania::WALK_ARTERIAL;
+            let t = if is_a { a_str } else { b_str };
+            if let Some(s) = t {
+                p.turn_fwd = s.to_string();
+            }
+            // interior vertices of long corridors sit mid-block
+            p.terminated = k == 0 || k == ordered.len() - 1;
+            c.add_point(p);
+        }
+        curves.push(c);
+    }
+}
 
 fn tazara_overlay(curves: &mut Vec<RoadCurve>, registry: &mut SignalRegistry) {
     let (tx, tz) = TAZARA;
-    // Nyerere Road E-W dual (4 approach lanes/dir: 1L 2TH 1R)
+    // Nyerere Road E-W dual (4 approach lanes/dir: 1L 2TH 1R) with BRT
+    // Phase-2 median busway (Fig 5.3.11 bus lanes on both approaches)
     dual(
         curves,
         "Nyerere Road",
@@ -552,7 +736,8 @@ fn tazara_overlay(curves: &mut Vec<RoadCurve>, registry: &mut SignalRegistry) {
         Some(("left|through|through|right", "through|through|through|through")),
         [0xc8, 0x8a, 0x2a],
     );
-    // Nelson Mandela Road N-S dual
+    brt_median(curves, "BRT Ph-2 Nyerere median", tx - 350.0, tz, tx + 350.0, tz, None);
+    // Nelson Mandela Road N-S dual (through the underpass level)
     dual(
         curves,
         "Nelson Mandela Road",
@@ -566,38 +751,36 @@ fn tazara_overlay(curves: &mut Vec<RoadCurve>, registry: &mut SignalRegistry) {
         Some(("left|through|through|right", "through|through|through|through")),
         [0xc8, 0x8a, 0x2a],
     );
-    // Nelson Mandela flyover: 540 m nose-to-nose, 250 m bridge,
-    // approaches 160/130 m, two 2-lane carriageways, 4 % grade,
-    // 17 m total width (JICA §5.3.5 + Fig 5.3.10). Decks ride ABOVE
-    // the ground carriageways (±9 m off the axis).
-    flyover(
+    // THE FLYOVER — Fig 5.3.10 concept design: Nelson Mandela over
+    // Nyerere. Two 2-lane decks ±9 m off the axis (17 m total width),
+    // 300 m bridge + 137.3/175.4 m approaches, crown 7 m.
+    flyover_jica(
         curves,
         "Tazara flyover N (NB)",
         tx - 9.0,
-        tz - 270.0,
+        tz - 306.0,
         tx - 9.0,
-        tz + 270.0,
+        tz + 306.0,
         0.0,
-        2,
-        7.0,
-        0.115,
-        0.13,
+        roads::tanzania::TAZARA_DECK_LANES,
+        roads::tanzania::FLYOVER_CROWN,
         [0xb0, 0x94, 0x58],
     );
-    flyover(
+    flyover_jica(
         curves,
         "Tazara flyover S (SB)",
         tx + 9.0,
-        tz - 270.0,
+        tz - 306.0,
         tx + 9.0,
-        tz + 270.0,
+        tz + 306.0,
         0.0,
-        2,
-        7.0,
-        0.115,
-        0.13,
+        roads::tanzania::TAZARA_DECK_LANES,
+        roads::tanzania::FLYOVER_CROWN,
         [0xb0, 0x94, 0x58],
     );
+    // Service roads in the four quadrants (Fig 5.3.11 at-grade plan)
+    service_road(curves, "Tazara service W", tx - 26.0, tz - 300.0, tx - 26.0, tz + 300.0, 5.0, [0x6a, 0x70, 0x62]);
+    service_road(curves, "Tazara service E", tx + 26.0, tz - 300.0, tx + 26.0, tz + 300.0, 5.0, [0x6a, 0x70, 0x62]);
     // 4-quadrant left slips (Fig 5.3.2)
     slip(curves, "Tazara slip NE", tx, tz, -1.35, -0.35, 30.0);
     slip(curves, "Tazara slip ES", tx, tz, 0.35, 1.22, 30.0);
@@ -605,6 +788,185 @@ fn tazara_overlay(curves: &mut Vec<RoadCurve>, registry: &mut SignalRegistry) {
     slip(curves, "Tazara slip WN", tx, tz, -2.79, -1.79, 30.0);
     // Signal: 120 s 4-phase G20 Y3 AR2 (Fig 5.3.2)
     registry.add(tx, tz, preset_tazara_4phase());
+}
+
+/* ---- Fig 5.5.1 priority corridors + sites ---- */
+
+/// All Fig 5.5.1 "Priority Arterial Intersections Targeted for
+/// Upgrading" sites, connected by their real arterial corridors with
+/// JICA turn lanes at every junction.
+fn priority_overlay(curves: &mut Vec<RoadCurve>, registry: &mut SignalRegistry) {
+    let app = roads::tanzania::APPROACH_1L2TH1R;
+    let thru = "through|through|through|through";
+    let amber = [0xc8, 0x8a, 0x2a];
+
+    /* Morogoro Road: Kijazi → Morocco → Magomeni (E corridor) — starts
+    just outside the Kijazi overlay core (which runs ±460 m) */
+    corridor_dual(
+        curves,
+        "Morogoro East corridor",
+        &[
+            (470.0, 33.0, Some(thru), Some(app)),
+            (MOROCCO.0, MOROCCO.1, Some(app), Some(app)),
+            (MAGOMENI.0, MAGOMENI.1, Some(app), Some(app)),
+            (4400.0, 700.0, Some(app), Some(thru)),
+        ],
+        9.0,
+        3,
+        amber,
+    );
+    registry.add(MOROCCO.0, MOROCCO.1, preset_two_phase(110.0));
+    registry.add(MAGOMENI.0, MAGOMENI.1, preset_two_phase(110.0));
+
+    /* Sam Nujoma Road: Kijazi → Mwenge (NE corridor; the report's
+    "next flyover" candidate — kept at-grade with full turn lanes;
+    starts outside the Kijazi overlay axis end at (272, -320)) */
+    corridor_dual(
+        curves,
+        "Sam Nujoma North corridor",
+        &[
+            (300.0, -350.0, Some(thru), Some(app)),
+            (1450.0, -950.0, None, None),
+            (MWENGE.0, MWENGE.1, Some(app), Some(app)),
+            (3700.0, -2450.0, Some(app), Some(thru)),
+        ],
+        9.0,
+        3,
+        amber,
+    );
+    // New Bagamoyo Road crosses at Mwenge (programmed widening)
+    corridor_dual(
+        curves,
+        "New Bagamoyo Road",
+        &[
+            (MWENGE.0 - 900.0, MWENGE.1 + 1500.0, Some(thru), Some(app)),
+            (MWENGE.0, MWENGE.1, Some(app), Some(app)),
+            (MWENGE.0 + 1500.0, MWENGE.1 + 2600.0, Some(app), Some(thru)),
+        ],
+        8.0,
+        3,
+        amber,
+    );
+    registry.add(MWENGE.0, MWENGE.1, preset_two_phase(130.0));
+
+    /* Nyerere Road: Tazara → Chang'Ombe → Gerezani (BRT Phase 2;
+    starts outside the Tazara Nyerere dual E end at tx+430) */
+    corridor_dual(
+        curves,
+        "Nyerere South corridor",
+        &[
+            (3691.0, 8647.0, Some(thru), Some(app)),
+            (3820.0, 7400.0, None, None),
+            (CHANGOMBE.0, CHANGOMBE.1, Some(app), Some(app)),
+            (GEREZANI.0 - 60.0, GEREZANI.1 + 40.0, Some(app), Some(thru)),
+        ],
+        9.0,
+        3,
+        amber,
+    );
+    brt_median(
+        curves,
+        "BRT Ph-2 Nyerere South median",
+        3700.0,
+        8500.0,
+        GEREZANI.0,
+        GEREZANI.1,
+        None,
+    );
+    registry.add(CHANGOMBE.0, CHANGOMBE.1, preset_two_phase(100.0));
+
+    /* Gerezani area (§5.5.4): Bandari Road 34 m six-lane section
+    (4 mixed + 2 BRT, Table 5.4.2) with the BRT-only flyover over
+    Nyerere (Fig 5.4.5: 260 m bridge, 11 m width, 8 spans) and the
+    Gerezani Bridge (Fig 5.4.10, 4-lane) toward the port. */
+    corridor_dual(
+        curves,
+        "Bandari Road",
+        &[
+            (GEREZANI.0 + 40.0, GEREZANI.1 - 240.0, Some(thru), Some(app)),
+            (GEREZANI.0, GEREZANI.1, Some(app), Some(app)),
+            (4750.0, 5980.0, Some(thru), Some(thru)),
+            (BANDARI_PORT.0, BANDARI_PORT.1, Some(app), Some(app)),
+            (BANDARI_PORT.0 + 700.0, BANDARI_PORT.1 - 500.0, Some(app), Some(thru)),
+        ],
+        9.0,
+        3,
+        amber,
+    );
+    // BRT pair on the Bandari median (cement busway)
+    brt_median(
+        curves,
+        "BRT Bandari median",
+        GEREZANI.0,
+        GEREZANI.1 - 220.0,
+        BANDARI_PORT.0 + 650.0,
+        BANDARI_PORT.1 - 460.0,
+        None,
+    );
+    // BRT-only flyover of Nyerere Road (Fig 5.4.5): 260 m bridge on
+    // 130 m transitions, 11 m wide, two BRT lanes, crown 6 m.
+    flyover_jica(
+        curves,
+        "BRT flyover of Nyerere",
+        GEREZANI.0 - 150.0,
+        GEREZANI.1 - 180.0,
+        GEREZANI.0 + 340.0,
+        GEREZANI.1 + 160.0,
+        9.0,
+        2,
+        6.0,
+        [0x2a, 0x9a, 0x8a],
+    );
+    // Gerezani Bridge: the Bandari corridor crosses the rail/creek on
+    // a 4-lane bridge (Fig 5.4.10) — lift that vertex to layer 1.
+    let gerezani_bridge = (4750.0f64, 5980.0f64);
+    for c in curves.iter_mut() {
+        if c.name.starts_with("Bandari Road") {
+            for p in &mut c.points {
+                if (p.x - gerezani_bridge.0).hypot(p.z - gerezani_bridge.1) < 60.0 {
+                    p.layer = 1;
+                    p.bridge = true;
+                    p.elev = 5.5;
+                }
+            }
+        }
+    }
+    registry.add(GEREZANI.0, GEREZANI.1, preset_two_phase(120.0));
+    registry.add(BANDARI_PORT.0, BANDARI_PORT.1, preset_two_phase(110.0));
+
+    /* Nelson Mandela beltway east: Tazara → Ring East → Selanda Br
+    (the report: "reinforcement of the Nelson Mandela Road beltway";
+    EC-funded 16 km surface + drainage upgrade) */
+    corridor_dual(
+        curves,
+        "Mandela East corridor",
+        &[
+            (TAZARA.0, TAZARA.1 + 430.0, Some(thru), Some(app)),
+            (MANDELA_E.0, MANDELA_E.1, Some(app), Some(app)),
+            (SELANDA.0, SELANDA.1, Some(app), Some(app)),
+            (SELANDA.0 + 1400.0, SELANDA.1 - 300.0, Some(app), Some(thru)),
+        ],
+        9.0,
+        3,
+        amber,
+    );
+    registry.add(MANDELA_E.0, MANDELA_E.1, preset_two_phase(100.0));
+    registry.add(SELANDA.0, SELANDA.1, preset_two_phase(110.0));
+
+    /* Kilwa Road from Selanda south (4 lanes + median BRT reserve,
+    Japan-funded upgrade §5.5.4) */
+    corridor_dual(
+        curves,
+        "Kilwa Road",
+        &[
+            (SELANDA.0 + 80.0, SELANDA.1 - 40.0, Some(thru), Some(app)),
+            (SELANDA.0 + 400.0, SELANDA.1 + 900.0, Some(thru), Some(thru)),
+            (SELANDA.0 + 500.0, SELANDA.1 + 2400.0, Some(app), Some(thru)),
+        ],
+        8.0,
+        2,
+        amber,
+    );
 }
 
 /* ---- Sam Nujoma × Igesa overlay ---- */

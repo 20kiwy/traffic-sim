@@ -1,0 +1,6 @@
+assets/vehicle_fleet/*.glb filter=lfs diff=lfs merge=lfs -text
+assets/glb/*.glb filter=lfs diff=lfs merge=lfs -text
+assets/jica/figs/*.png filter=lfs diff=lfs merge=lfs -text
+assets/ra_textures/*.png filter=lfs diff=lfs merge=lfs -text
+assets/jica/*.pdf filter=lfs diff=lfs merge=lfs -text
+assets/vissim/** filter=lfs diff=lfs merge=lfs -text

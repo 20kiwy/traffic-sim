@@ -17,6 +17,7 @@ pub mod model;
 pub mod prefab;
 pub mod surface;
 pub mod terrain;
+pub mod tanzania;
 
 pub use curve::{bez_point, flatten_cubic, segment_cubic, CubicSeg, EPS};
 pub use junction::{

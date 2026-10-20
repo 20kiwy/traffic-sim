@@ -13,3 +13,6 @@
 [submodule "clone/TerraZone"]
 	path = clone/TerraZone
 	url = https://github.com/20kiwy/TerraZone.git
+[submodule "clone/RoadArchitect"]
+	path = clone/RoadArchitect
+	url = https://github.com/MicroGSD/RoadArchitect.git

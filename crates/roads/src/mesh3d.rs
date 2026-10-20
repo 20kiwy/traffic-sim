@@ -1085,3 +1085,263 @@ pub fn pier_parts(curve: &RoadCurve) -> Vec<MeshPart> {
     }
     parts
 }
+
+/* ============ R10 — bridge formwork, railing, drains ============ */
+
+/// Concrete parapet + steel top rail along every elevated stretch
+/// (bridge "railing and extrusions"): a 0.9 m solid parapet extruded
+/// just inside each paved edge plus slim posts and a handrail bar.
+/// Uses the RoadArchitect GSDRailing profile scaled to our decks.
+pub fn railing_parts(curve: &RoadCurve) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if !curve.has_elevated() {
+        return parts;
+    }
+    let pts = curve.centerline(4.0);
+    if pts.len() < 2 {
+        return parts;
+    }
+    const PARAPET_H: f64 = 0.9;
+    const PARAPET_T: f64 = 0.18;
+    const RAIL_H: f64 = 1.15;
+    let mut para = MeshPart::new(CONCRETE_TINT);
+    para.tex = TEX_CEMENT;
+    let mut rail = MeshPart::new(rgb([176, 178, 184], 1.0)); // galvanised
+    for side in [-1.0f32, 1.0] {
+        let mut prev: Option<(f32, f32, f32, f32)> = None; // (outer_x, outer_z, inner_x, inner_z)
+        let mut rail_prev: Option<Vec3> = None;
+        for i in 0..pts.len() {
+            let p = pts[i];
+            let q = if i + 1 < pts.len() { pts[i + 1] } else { pts[i - 1] };
+            let dx = (q.x - p.x) as f64;
+            let dz = (q.z - p.z) as f64;
+            let l = (dx.hypot(dz)).max(1e-6);
+            let (nx, nz) = (-(dz / l) as f32, (dx / l) as f32); // left normal
+            let outer_x = p.x + nx * side * (curve.paved_width() / 2.0 - 0.05) as f32;
+            let outer_z = p.z + nz * side * (curve.paved_width() / 2.0 - 0.05) as f32;
+            let inner_x = p.x + nx * side * (curve.paved_width() / 2.0 - 0.05 - PARAPET_T) as f32;
+            let inner_z = p.z + nz * side * (curve.paved_width() / 2.0 - 0.05 - PARAPET_T) as f32;
+            let deck_y = p.y + 0.12;
+            if let Some((po_x, po_z, pi_x, pi_z)) = prev {
+                // parapet extrusion: outer face + inner face + top cap
+                for (x0, z0, x1, z1) in [(po_x, po_z, outer_x, outer_z), (pi_x, pi_z, inner_x, inner_z)] {
+                    let base = para.positions.len() as u32;
+                    para.positions.push(Vec3::new(x0, deck_y, z0));
+                    para.positions.push(Vec3::new(x1, deck_y, z1));
+                    para.positions.push(Vec3::new(x1, deck_y + PARAPET_H as f32, z1));
+                    para.positions.push(Vec3::new(x0, deck_y + PARAPET_H as f32, z0));
+                    para.uv.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 0.5], [0.0, 0.5]]);
+                    para.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                }
+            }
+            prev = Some((outer_x, outer_z, inner_x, inner_z));
+            // handrail ribbon: a thin horizontal bar 0.05 m tall
+            let rx = p.x + nx * side * (curve.paved_width() / 2.0 - 0.14) as f32;
+            let rz = p.z + nz * side * (curve.paved_width() / 2.0 - 0.14) as f32;
+            let top = Vec3::new(rx, p.y + RAIL_H as f32, rz);
+            let bot = Vec3::new(rx, p.y + (RAIL_H + 0.05) as f32, rz);
+            if let Some(tprev) = rail_prev {
+                let base = rail.positions.len() as u32;
+                rail.positions.push(tprev);
+                rail.positions.push(top);
+                rail.positions.push(bot);
+                rail.uv.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]]);
+                rail.indices.extend_from_slice(&[base, base + 1, base + 2]);
+            }
+            rail_prev = Some(top);
+            // posts every ~8 m (samples are 4 m — take every 2nd)
+            if i % 2 == 0 {
+                let (sx, sz) = (outer_x, outer_z);
+                let base = rail.positions.len() as u32;
+                // slim triangular post (two triangles forming a blade)
+                rail.positions.push(Vec3::new(sx, deck_y, sz));
+                rail.positions.push(Vec3::new(sx, deck_y + RAIL_H as f32, sz));
+                rail.positions.push(Vec3::new(sx + nx * 0.04 * side, deck_y, sz + nz * 0.04 * side));
+                rail.positions.push(Vec3::new(sx + nx * 0.04 * side, deck_y + RAIL_H as f32, sz + nz * 0.04 * side));
+                rail.uv.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [0.2, 0.0], [0.2, 1.0]]);
+                rail.indices.extend_from_slice(&[base, base + 1, base + 3, base, base + 3, base + 2]);
+            }
+        }
+    }
+    parts.push(para);
+    parts.push(rail);
+    parts
+}
+
+/// Concrete abutment blocks + wingwalls at both ends of an elevated
+/// stretch (formwork: the deck lands on these). Also emits a cap beam
+/// on top of every pier from `pier_parts` spacing rules.
+pub fn abutment_parts(curve: &RoadCurve) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if !curve.has_elevated() {
+        return parts;
+    }
+    let pts = curve.centerline(6.0);
+    if pts.len() < 2 {
+        return parts;
+    }
+    let half = curve.paved_width() / 2.0;
+    let mut part = MeshPart::new(CONCRETE_TINT);
+    part.tex = TEX_CEMENT;
+    let ends = [pts.first().unwrap(), pts.last().unwrap()];
+    for (ei, p) in ends.iter().enumerate() {
+        let q = if ei == 0 { &pts[1] } else { &pts[pts.len() - 2] };
+        let dx = (q.x - p.x) as f64;
+        let dz = (q.z - p.z) as f64;
+        let l = (dx.hypot(dz)).max(1e-6);
+        let (ux, uz) = ((dx / l) as f32, (dz / l) as f32);
+        let (nx, nz) = (-uz, ux);
+        let deck_y = if p.y as f64 > 2.5 { p.y as f64 } else { continue };
+        let h = deck_y; // wall rises from ground to deck underside
+        let w = (half + 1.2) as f32;
+        // abutment wall: perpendicular slab under the deck end
+        let sign = if ei == 0 { -1.0 } else { 1.0 };
+        let corners: Vec<(f32, f32)> = vec![
+            (p.x + nx * w, p.z + nz * w),
+            (p.x - nx * w, p.z - nz * w),
+            (
+                (p.x - nx * w) + ux * 1.6 * sign,
+                (p.z - nz * w) + uz * 1.6 * sign,
+            ),
+            (
+                (p.x + nx * w) + ux * 1.6 * sign,
+                (p.z + nz * w) + uz * 1.6 * sign,
+            ),
+        ];
+        // front + back faces of the wall block
+        for (x0, z0) in &corners {
+            let base = part.positions.len() as u32;
+            part.positions.push(Vec3::new(*x0, 0.0, *z0));
+            part.positions.push(Vec3::new(
+                x0 + ux * 0.8 * sign,
+                0.0,
+                z0 + uz * 0.8 * sign,
+            ));
+            part.positions.push(Vec3::new(
+                x0 + ux * 0.8 * sign,
+                (h - 0.3) as f32,
+                z0 + uz * 0.8 * sign,
+            ));
+            part.positions.push(Vec3::new(*x0, (h - 0.3) as f32, *z0));
+            part.uv.extend_from_slice(&[[0.0, 0.0], [0.4, 0.0], [0.4, (h / 3.0) as f32], [0.0, (h / 3.0) as f32]]);
+            part.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+    parts.push(part);
+    parts
+}
+
+/// Roadside open drains (TANROADS trapezoidal channel — JICA §5.5.3
+/// "considerable enhancements of road surface, drainage"). Rendered as
+/// a concrete U-channel beside the paved edge wherever the point's
+/// gutter profile is active on ARTERIAL-scale cross-sections (paved
+/// width >= 9 m, not BRT slabs), so local streets stay clean while
+/// arterials read as engineered roads in both 3D and 2D drawings.
+pub fn drain_parts(curve: &RoadCurve) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if curve.points.is_empty() {
+        return parts;
+    }
+    // arterial-scale paved roads only; BRT slabs (cement, gutterless)
+    // and walkways carry kerb drainage instead
+    let first = &curve.points[0];
+    if curve.paved_width() < 9.0 || first.surface == crate::surface::CEMENT || first.lane_width < 2.2 {
+        return parts;
+    }
+    let pts = curve.centerline(6.0);
+    if pts.len() < 2 {
+        return parts;
+    }
+    const TOP_W: f64 = crate::tanzania::DRAIN_BOTTOM + 2.0 * crate::tanzania::DRAIN_DEPTH;
+    const DEPTH: f64 = crate::tanzania::DRAIN_DEPTH;
+    let mut chan = MeshPart::new(rgb([148, 150, 154], 1.0)); // concrete U
+    chan.tex = TEX_SIDEWALK;
+    let mut water = MeshPart::new(rgb([64, 96, 96], 1.0)); // trickle flow
+    for side in [-1.0f32, 1.0] {
+        let mut outer_prev: Option<Vec3> = None;
+        let mut inner_prev: Option<Vec3> = None;
+        for (i, p) in pts.iter().enumerate() {
+            let q = if i + 1 < pts.len() { pts[i + 1] } else { pts[i - 1] };
+            let dx = q.x - p.x;
+            let dz = q.z - p.z;
+            let l = (dx.hypot(dz)).max(1e-6);
+            let (nx, nz) = (-dz / l as f32, dx / l as f32);
+            let off = (curve.paved_width() / 2.0 + crate::tanzania::DRAIN_OFFSET) as f32;
+            let ox = p.x + nx * side * off;
+            let oz = p.z + nz * side * off;
+            let ix = p.x + nx * side * (off - TOP_W as f32 / 2.0);
+            let iz = p.z + nz * side * (off - TOP_W as f32 / 2.0);
+            let y0 = p.y - 0.05;
+            let yb = p.y - 0.05 - DEPTH as f32;
+            let outer = Vec3::new(ox, y0, oz);
+            let inner = Vec3::new(ix, y0, iz);
+            if let (Some(po), Some(pi)) = (outer_prev, inner_prev) {
+                // channel cross-section: outer wall (po→bo), bottom
+                // (bo→bi), inner wall (bi→pi) as three quads per step
+                let bo = Vec3::new(po.x, yb, po.z);
+                let bo2 = Vec3::new(outer.x, yb, outer.z);
+                let bi = Vec3::new(inner.x, yb, inner.z);
+                let pi2 = Vec3::new(pi.x, y0, pi.z);
+                for (a, b, c, d) in [
+                    (po, outer, bo2, bo),   // outer wall
+                    (bo, bo2, bi, bi),      // bottom (degenerate c==d)
+                    (bi, bi, pi2, pi),      // inner wall
+                ] {
+                    let base = chan.positions.len() as u32;
+                    chan.positions.push(a);
+                    chan.positions.push(b);
+                    chan.positions.push(c);
+                    chan.positions.push(d);
+                    chan.uv.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+                    chan.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                }
+                // trickle water ribbon along the bottom
+                let wb = Vec3::new(po.x, yb + 0.15, po.z);
+                let wb2 = Vec3::new(outer.x, yb + 0.15, outer.z);
+                let wbi = Vec3::new(inner.x, yb + 0.15, inner.z);
+                let base = water.positions.len() as u32;
+                water.positions.push(wb);
+                water.positions.push(wb2);
+                water.positions.push(wbi);
+                water.indices.extend_from_slice(&[base, base + 1, base + 2]);
+            }
+            outer_prev = Some(outer);
+            inner_prev = Some(inner);
+        }
+    }
+    parts.push(chan);
+    parts
+}
+
+/// Expansion-joint + bearing lines on the deck: thin dark strips across
+/// the deck at each span boundary of the JICA span assembly (only for
+/// curves flagged with `span_marks`, set by the DSM builder).
+pub fn joint_parts(curve: &RoadCurve, span_starts: &[f64]) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if span_starts.is_empty() || !curve.has_elevated() {
+        return parts;
+    }
+    let len = curve.length_m();
+    let half = curve.paved_width() / 2.0;
+    let mut part = MeshPart::new(rgb([58, 58, 62], 1.0));
+    for &s in span_starts {
+        if s <= 1.0 || s >= len - 1.0 {
+            continue;
+        }
+        let Some((p, yaw)) = curve.sample_at(s) else { continue };
+        let (nx, nz) = (-(yaw as f32).sin(), (yaw as f32).cos());
+        let (cx, cz) = (p.x, p.z);
+        let (x0, z0) = (cx + nx * half as f32, cz + nz * half as f32);
+        let (x1, z1) = (cx - nx * half as f32, cz - nz * half as f32);
+        let w = 0.14f32; // joint strip width
+        let base = part.positions.len() as u32;
+        part.positions.push(Vec3::new(x0, p.y + 0.05, z0));
+        part.positions.push(Vec3::new(x1, p.y + 0.05, z1));
+        part.positions.push(Vec3::new(x1, p.y + 0.05 + w, z1));
+        part.positions.push(Vec3::new(x0, p.y + 0.05 + w, z0));
+        part.uv.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        part.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    parts.push(part);
+    parts
+}

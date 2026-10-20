@@ -10,7 +10,7 @@ members = [
 default-members = [
     "crates/gdmath", "crates/gdscript", "crates/roads", "crates/roadkit",
     "crates/egui-kit", "crates/engine", "crates/data", "crates/bridge",
-    "crates/toolkit", "crates/ui",
+    "crates/toolkit", "crates/ui", "crates/simflow",
     "apps/egui-app", "apps/roadkit-cli", "apps/yakui-app", "xtask",
 ]
 
@@ -34,6 +34,7 @@ gdmath = { path = "crates/gdmath" }
 gdscript = { path = "crates/gdscript" }
 roads = { path = "crates/roads" }
 roadkit = { path = "crates/roadkit" }
+simflow = { path = "crates/simflow" }
 egui-kit = { path = "crates/egui-kit" }
 engine = { path = "crates/engine" }
 tsdata = { path = "crates/data" }

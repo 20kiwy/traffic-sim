@@ -1,6 +1,6 @@
 {
   "name": "Terrazone roadkit assets",
-  "note": "GLB props rendered by the 3D road preview (GRG-style scene dressing)",
+  "note": "GLB props rendered by the 3D road preview (GRG-style scene dressing) + JICA vehicle fleet (simflow classes)",
   "assets": [
     {
       "id": "milestone",
@@ -179,6 +179,36 @@
       "bytes": 6100,
       "role": "junction prefab (WFC tile)",
       "note": "highway off-ramp prefab"
+    },
+    {
+      "id": "car_sedan",
+      "file": "assets/glb/car_sedan.glb",
+      "bytes": 4344,
+      "role": "JICA fleet \u2014 private car"
+    },
+    {
+      "id": "daladala",
+      "file": "assets/glb/daladala.glb",
+      "bytes": 4328,
+      "role": "JICA fleet \u2014 daladala minibus"
+    },
+    {
+      "id": "brt_bus",
+      "file": "assets/glb/brt_bus.glb",
+      "bytes": 5288,
+      "role": "JICA fleet \u2014 DART BRT bus"
+    },
+    {
+      "id": "truck",
+      "file": "assets/glb/truck.glb",
+      "bytes": 5116,
+      "role": "JICA fleet \u2014 heavy truck"
+    },
+    {
+      "id": "moto",
+      "file": "assets/glb/moto.glb",
+      "bytes": 3584,
+      "role": "JICA fleet \u2014 boda-boda motorcycle"
     }
   ]
 }

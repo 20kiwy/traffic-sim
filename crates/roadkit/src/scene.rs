@@ -185,7 +185,14 @@ pub fn build_scene_full_with_bg(
     let mut parts: Vec<ScenePart> = Vec::new();
     let mut tris = 0usize;
     for c in curves {
-        for part in build_parts(c, MeshQuality { markings: true, sample_m: 4.0 }) {
+        // per-curve assembly: build_parts covers surface + gutters +
+        // piers; R10 adds bridge formwork (railing/abutments) and the
+        // TANROADS roadside drains
+        let mut mesh: Vec<roads::mesh3d::MeshPart> = build_parts(c, MeshQuality { markings: true, sample_m: 4.0 });
+        mesh.extend(roads::mesh3d::railing_parts(c));
+        mesh.extend(roads::mesh3d::abutment_parts(c));
+        mesh.extend(roads::mesh3d::drain_parts(c));
+        for part in mesh {
             tris += if part.indices.is_empty() {
                 part.positions.len() / 3
             } else {

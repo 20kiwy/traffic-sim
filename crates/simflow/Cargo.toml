@@ -1,0 +1,9 @@
+[package]
+name = "simflow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gdmath = { path = "../gdmath" }
+roads = { path = "../roads" }
