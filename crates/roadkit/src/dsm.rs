@@ -272,6 +272,9 @@ pub fn build_dsm() -> DsmScene {
         ("Selanda Bridge (Mandela × Kilwa)".into(), SELANDA.0, SELANDA.1),
     ];
 
+    // R11 RoadArchitect-style guardrails on approaches/slips/BRT edges
+    apply_guardrails(&mut curves);
+
     // orient every auto_bearing point (the builders set the flag but the
     // GRG-style re-orientation normally runs from the script bridge only —
     // without this the N-S carriageways keep bearing 0 and BOW east)
@@ -1134,4 +1137,162 @@ pub fn build_dsm_local(site: (f64, f64), reach_m: f64) -> DsmScene {
         .map(|(n, x, z)| (n.clone(), x - sx, z - sz))
         .collect();
     DsmScene { curves, registry, pois }
+}
+
+/* ------------- R11 roadside enrichment (RoadArchitect style) ------------- */
+
+use crate::buildings::{blocks_for_sites, Site};
+use crate::props::{join_along, stamp, JoinParams, PropInstance};
+
+/// Flag curves for RoadArchitect-style W-beam guardrails (docs §2):
+/// flyover approach ramps, slip roads and BRT corridors. Logic-restricted —
+/// arterials at grade stay open.
+pub fn apply_guardrails(curves: &mut [RoadCurve]) {
+    for c in curves.iter_mut() {
+        let n = c.name.to_lowercase();
+        c.guardrail = n.contains("flyover")
+            || n.contains("slip")
+            || n.contains("brt")
+            || n.contains("ramp")
+            || n.contains("bridge");
+    }
+}
+
+/// Roadside props (the "edge objects" of RA — docs §2): streetlights every
+/// ~36 m on arterials, acacia/palm tree runs, speed-limit signs, and the
+/// BRT station props at the modelled station sites.
+pub fn dsm_props_capped(curves: &[RoadCurve], max_range: f64) -> Vec<PropInstance> {
+    let mut out: Vec<PropInstance> = Vec::new();
+    const TREE_CAP: usize = 950;
+    let mut tree_count = 0usize;
+    let mut sign_i = 0u64;
+    for c in curves {
+        let n = c.name.to_lowercase();
+        let walk = n.contains("walkway") || n.contains("cycleway") || n.contains("path");
+        let elevated = c.has_elevated();
+        let paved = c.paved_width();
+        let arterial = paved >= 9.0 && !walk;
+
+        // streetlights (RA GSDStreetLightSingle: MeterSep 30 m, edge offset)
+        if arterial {
+            out.extend(join_along(
+                c,
+                "streetlight",
+                &JoinParams {
+                    spacing: 36.0,
+                    lateral: paved / 2.0 + 1.0,
+                    alternate: true,
+                    align: true,
+                    scale: 1.0,
+                    jitter: 0.05,
+                    random_yaw: false,
+                    seed: 0x51AF,
+                },
+            ));
+            // speed-limit signs every ~280 m (RA FedSign singles)
+            let len = c.length_m();
+            let mut s = 90.0;
+            while s < len - 40.0 {
+                if let Some(p) = stamp(c, if sign_i % 2 == 0 { "signSpeed50" } else { "signSpeed80" }, s / len, paved / 2.0 + 2.2, true, 1.0) {
+                    out.push(p);
+                }
+                sign_i += 1;
+                s += 280.0;
+            }
+        }
+
+        // trees — ground roads only (decks carry parapets, not gardens)
+        if !elevated && !walk && tree_count < TREE_CAP {
+            for (asset, spacing, seed) in [
+                ("tree", 21.0, 0xACAC),
+                ("palm", 44.0, 0x1A1E),
+            ] {
+                let props = join_along(
+                    c,
+                    asset,
+                    &JoinParams {
+                        spacing,
+                        lateral: paved / 2.0 + 3.8,
+                        alternate: true,
+                        align: false,
+                        scale: 1.15,
+                        jitter: 0.35,
+                        random_yaw: true,
+                        seed,
+                    },
+                );
+                tree_count += props.len();
+                out.extend(props);
+                if tree_count >= TREE_CAP {
+                    break;
+                }
+            }
+        }
+    }
+
+    // BRT station props at the modelled stations (JICA Ph-1 flare 150 m W)
+    for c in curves {
+        if c.name.starts_with("BRT Ph-1 Morogoro median") {
+            if let Some(p) = stamp(c, "brtStation", 0.3256, 0.0, true, 1.0) {
+                out.push(p);
+            }
+        }
+        if c.name.starts_with("BRT Ph-2 Nyerere median") {
+            if let Some(p) = stamp(c, "brtShelterSmall", 0.5, 0.0, true, 1.0) {
+                out.push(p);
+            }
+        }
+    }
+
+    // junction-clearing gate: drop props standing on crossing pavement
+    // (any two curves' points within 12 m); local close-ups also cap the
+    // range so nothing renders at the fog edge (floating-trees artifact)
+    out.retain(|p| {
+        if (p.pos.x as f64).hypot(p.pos.z as f64) > max_range {
+            return false;
+        }
+        p.asset != "tree" || !near_crossing(curves, p.pos.x as f64, p.pos.z as f64, 12.0)
+    });
+    out
+}
+
+/// Full-scene props (no range cap — the app recenter keeps everything).
+pub fn dsm_props(curves: &[RoadCurve]) -> Vec<PropInstance> {
+    dsm_props_capped(curves, f64::INFINITY)
+}
+
+/// True when (x, z) sits within `r` of ANOTHER curve's samples (crossing
+/// pavement) — used to keep trees off junction pads.
+fn near_crossing(curves: &[RoadCurve], x: f64, z: f64, r: f64) -> bool {
+    let mut hits = 0;
+    for c in curves {
+        for p in &c.points {
+            if (p.x - x).hypot(p.z - z) < r {
+                hits += 1;
+                if hits >= 2 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// JICA site blocks for the procedural buildings (docs §7):
+/// Kijazi/Ubungo commercial, Sinza residential, Tazara, Mwenge market,
+/// Gerezani/Bandari, Selanda.
+pub fn dsm_building_sites() -> Vec<Site> {
+    vec![
+        (0.0, 0.0, 420.0, true),               // Kijazi / Ubungo
+        (IGESA_XZ.0, IGESA_XZ.1, 340.0, false), // Sinza residential
+        (TAZARA.0, TAZARA.1, 340.0, false),     // Tazara
+        (MWENGE.0, MWENGE.1, 280.0, true),      // Mwenge market
+        (GEREZANI.0, GEREZANI.1, 260.0, false), // Gerezani / Bandari
+        (SELANDA.0, SELANDA.1, 220.0, false),   // Selanda
+    ]
+}
+
+/// Procedural city blocks (world-space mesh parts) for the JICA sites.
+pub fn dsm_buildings(curves: &[RoadCurve]) -> Vec<roads::mesh3d::MeshPart> {
+    blocks_for_sites(curves, &dsm_building_sites(), 0xD5_1A57)
 }

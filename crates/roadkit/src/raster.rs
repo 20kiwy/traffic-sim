@@ -18,6 +18,12 @@ pub enum ShadeMode {
     Normals,
     /// hidden-line wireframe (depth fill + bright edges)
     Wireframe,
+    /// solid (textured) fill + bright edge overlay
+    ShadedWire,
+    /// grayscale view-depth (white near → black far)
+    Depth,
+    /// 2× SSAA supersampled Solid (handled by the render entry points)
+    Quality,
 }
 
 pub struct Frame {
@@ -34,6 +40,8 @@ pub struct Frame {
     pub fog_on: bool,
     /// active shading mode (Blender-style viewport modes)
     pub shade: ShadeMode,
+    /// (near, far) view distance in meters for the Depth mode gradient
+    pub depth_range: (f32, f32),
     /// parallel rendering: this frame covers the horizontal band of the FULL
     /// image starting at `y_base`; projection maps into FULL-image pixels then
     /// shifts by `-y_base` so local pixel (0,0) is full-image (0, y_base).
@@ -62,6 +70,7 @@ impl Frame {
             ],
             fog_on: false,
             shade: ShadeMode::Solid,
+            depth_range: (5.0, 600.0),
             y_base,
             full_h,
         };
@@ -200,7 +209,19 @@ impl Frame {
                     shade = 1.0;
                     local_tex = None;
                 }
-                ShadeMode::Solid => {}
+                ShadeMode::Depth => {
+                    // grayscale view-depth: white near → black far
+                    let (near, far) = self.depth_range;
+                    let span = (far - near).max(1.0);
+                    for s in scr.iter_mut() {
+                        let d = (-s.2 - near) / span; // s.2 = view z (negative)
+                        let g = (1.0 - d.clamp(0.0, 1.0)) as f32;
+                        s.4 = [g, g, g, 1.0];
+                    }
+                    shade = 1.0;
+                    local_tex = None;
+                }
+                ShadeMode::ShadedWire | ShadeMode::Solid | ShadeMode::Quality => {}
             }
 
             // fan triangulate the clipped polygon
@@ -212,10 +233,16 @@ impl Frame {
             }
 
             // wireframe edges on top of the depth fill
-            if self.shade == ShadeMode::Wireframe {
+            if self.shade == ShadeMode::Wireframe || self.shade == ShadeMode::ShadedWire {
                 let pts: Vec<(f32, f32, f32)> =
                     scr.iter().map(|s| (s.0, s.1, s.2)).collect();
-                let edge = [0.62, 0.78, 0.95, 1.0];
+                let edge = if self.shade == ShadeMode::Wireframe {
+                    [0.62, 0.78, 0.95, 1.0]
+                } else {
+                    // dark edges over the solid fill (Blender "curvature
+                    // overlay" look — raster_line writes opaque)
+                    [0.13, 0.13, 0.16, 1.0]
+                };
                 for w in pts.windows(2) {
                     raster_line(self, w[0], w[1], edge);
                 }
@@ -377,4 +404,35 @@ fn raster_tri(
 /// Perspective-correct edge helper (signed edge function).
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f64, py: f64) -> f32 {
     ((bx - ax) as f64 * (py - ay as f64) - (by - ay) as f64 * (px - ax as f64)) as f32
+}
+
+/// Box-filter downsample an RGBA8 buffer by an integer factor (Quality
+/// mode SSAA: render at `w*ss × h*ss`, shrink back to w×h).
+pub fn box_downsample(rgba: &[u8], w: usize, h: usize, ss: usize) -> Vec<u8> {
+    if ss <= 1 {
+        return rgba.to_vec();
+    }
+    let ow = w / ss;
+    let oh = h / ss;
+    let mut out = vec![0u8; ow * oh * 4];
+    let ss2 = (ss * ss) as u32;
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+            for dy in 0..ss {
+                for dx in 0..ss {
+                    let i = ((oy * ss + dy) * w + (ox * ss + dx)) * 4;
+                    r += rgba[i] as u32;
+                    g += rgba[i + 1] as u32;
+                    b += rgba[i + 2] as u32;
+                }
+            }
+            let o = (oy * ow + ox) * 4;
+            out[o] = (r / ss2) as u8;
+            out[o + 1] = (g / ss2) as u8;
+            out[o + 2] = (b / ss2) as u8;
+            out[o + 3] = 255;
+        }
+    }
+    out
 }

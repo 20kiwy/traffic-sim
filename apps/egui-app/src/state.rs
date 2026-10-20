@@ -334,6 +334,8 @@ pub struct LaunchConfig {
     pub dock_tab: Option<DockTab>,
     /// load the Dar es Salaam (JICA + OSM) scenario instead of the demo
     pub dsm: bool,
+    /// load a per-site DSM close-up (web preview `?scene=` deep links)
+    pub dsm_site: Option<(f64, f64)>,
     /// camera radius (m) for the DSM opening frame
     pub dsm_radius: f32,
 }
@@ -515,7 +517,12 @@ impl RoadkitApp {
         // First impression: build the demo scene so GLB props are already
         // joined along the road when the app opens.
         app.run_script();
-        if cfg.dsm {
+        if let Some((sx, sz)) = cfg.dsm_site {
+            app.load_dsm_at(sx, sz);
+            if cfg.dsm_radius > 0.0 {
+                app.cam.dist = cfg.dsm_radius;
+            }
+        } else if cfg.dsm {
             app.load_dsm();
             // optional close-up radius override (site framing comes from
             // load_dsm — it aims at the post-recenter site position)
@@ -771,13 +778,32 @@ impl RoadkitApp {
     /// traffic). Replaces the current scene.
     pub fn load_dsm(&mut self) {
         let dsm = roadkit::build_dsm();
+        self.install_dsm(dsm, "Dar es Salaam loaded");
+    }
+
+    /// Per-site DSM close-up (web `?scene=tazara` deep links + CLI sites):
+    /// only the curves within ~700 m of the site, site at the origin.
+    pub fn load_dsm_at(&mut self, sx: f64, sz: f64) {
+        let dsm = roadkit::build_dsm_local((sx, sz), 700.0);
+        self.install_dsm(dsm, "Dar es Salaam site loaded");
+    }
+
+    /// Install a DsmScene into the app (curves + props + enrichment +
+    /// signals + camera framing). Shared by load_dsm / load_dsm_at.
+    pub fn install_dsm(&mut self, mut dsm: roadkit::DsmScene, label: &str) {
         let n_curves = dsm.curves.len();
         let n_signals = dsm.registry.entries.len();
         let pois = dsm.pois.clone();
+        // R11 RoadArchitect-style enrichment: procedural city blocks +
+        // streetlights / trees / signs / BRT stations along the corridors
+        let buildings = roadkit::dsm::dsm_buildings(&dsm.curves);
+        let roadside = roadkit::dsm::dsm_props_capped(&dsm.curves, 760.0);
         {
             let mut sc = self.scene.borrow_mut();
             sc.curves = dsm.curves;
             sc.props.clear();
+            sc.props.extend(roadside);
+            sc.enrich = buildings;
             // real city corridor (9 km across) — the terrain heightfield is
             // a demo-scale feature and would oversize on this bbox
             sc.terrain.enabled = false;
@@ -796,6 +822,7 @@ impl RoadkitApp {
         self.render.sim_left_hand = true; // Tanzania drives on the left
         self.render.sim = None;
         self.render.dirty = true;
+        let _ = label;
         self.script_status = ScriptStatus::Ok(format!(
             "Dar es Salaam loaded — {n_curves} curves · {n_signals} controlled junctions (JICA TR2)"
         ));

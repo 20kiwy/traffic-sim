@@ -8,6 +8,7 @@
 //! - rendering: dependency-free CPU rasterizer → egui texture
 
 pub mod bridge_host;
+pub mod buildings;
 pub mod dsm;
 pub mod export;
 pub mod flow;

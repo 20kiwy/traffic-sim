@@ -533,6 +533,11 @@ pub struct RoadCurve {
     /* ---- GRG RoadContainer: Decoration ---- */
     /// create edge curves (left / center / right Path3Ds)
     pub create_edge_curves: bool,
+    /* ---- R11 RoadArchitect extrusions ---- */
+    /// sweep RoadArchitect-style W-beam guardrails along the road edges
+    /// (flyover approaches, embankments, BRT corridors — logic-restricted,
+    /// set explicitly by the scenario builders)
+    pub guardrail: bool,
     /* ---- GRG RoadContainer: Internal data ---- */
     pub debug: bool,
 }
@@ -556,6 +561,7 @@ impl Default for RoadCurve {
             draw_lanes_editor: true,
             draw_lanes_game: false,
             create_edge_curves: false,
+            guardrail: false,
             debug: false,
         }
     }

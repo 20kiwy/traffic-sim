@@ -41,6 +41,36 @@ fn cli_run(args: &[String]) -> i32 {
             }
         };
     }
+    // single-site render: --dsm-site x,z,name (per-site camera env framing)
+    if let Some(spec) = arg_of(args, "--dsm-site") {
+        let parts: Vec<&str> = spec.splitn(3, ',').collect();
+        if parts.len() == 3 {
+            let sx: f64 = parts[0].trim().parse().unwrap_or(0.0);
+            let sz: f64 = parts[1].trim().parse().unwrap_or(0.0);
+            let name = parts[2].trim().to_string();
+            let w: u32 = arg_of(args, "--size")
+                .and_then(|s| s.split('x').next().and_then(|v| v.parse().ok()))
+                .unwrap_or(1280);
+            let h: u32 = arg_of(args, "--size")
+                .and_then(|s| s.split('x').nth(1).and_then(|v| v.parse().ok()))
+                .unwrap_or(800);
+            let ss: usize = arg_of(args, "--ss").and_then(|s| s.parse().ok()).unwrap_or(2).clamp(1, 4);
+            let sim: f64 = arg_of(args, "--sim").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let density: f64 = arg_of(args, "--density").and_then(|s| s.parse().ok()).unwrap_or(14.0);
+            return match roadkit_cli::render_dsm(&[(sx, sz, name.leak())], w, h, ss, sim, density) {
+                Ok(files) => {
+                    for f in &files {
+                        println!("saved {f}");
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    1
+                }
+            };
+        }
+    }
     if args.iter().any(|a| a == "--dsm") {
         let w: u32 = arg_of(args, "--size")
             .and_then(|s| s.split('x').next().and_then(|v| v.parse().ok()))

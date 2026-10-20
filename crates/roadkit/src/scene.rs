@@ -192,6 +192,28 @@ pub fn build_scene_full_with_bg(
     terrain: Option<&roads::terrain::TerrainState>,
     backdrop: [f32; 3],
 ) -> Scene {
+    build_scene_enriched(
+        curves, junctions, props, lanes, library, show_grid, show_lanes,
+        terrain, backdrop, &[],
+    )
+}
+
+/// `build_scene_full_with_bg` + world-space enrichment geometry
+/// (procedural buildings — `buildings::blocks_for_sites`), appended to
+/// the road mesh parts with the same recentering offset.
+#[allow(clippy::too_many_arguments)]
+pub fn build_scene_enriched(
+    curves: &[RoadCurve],
+    junctions: &[roads::junction::Junction],
+    props: &[crate::props::PropInstance],
+    lanes: &[roads::lane::RoadLane],
+    library: &AssetLibrary,
+    show_grid: bool,
+    show_lanes: bool,
+    terrain: Option<&roads::terrain::TerrainState>,
+    backdrop: [f32; 3],
+    extras: &[roads::mesh3d::MeshPart],
+) -> Scene {
     let _ = library; // props carry their own resolved indices
     // bbox of all curve points
     let (mut min_x, mut min_z) = (f64::INFINITY, f64::INFINITY);
@@ -228,6 +250,27 @@ pub fn build_scene_full_with_bg(
                 tex: part.tex,
             });
         }
+    }
+
+    // R11 enrichment (buildings etc.) — same recentering as the road parts
+    for part in extras {
+        tris += if part.indices.is_empty() {
+            part.positions.len() / 3
+        } else {
+            part.indices.len() / 3
+        };
+        parts.push(ScenePart {
+            positions: part
+                .positions
+                .iter()
+                .map(|v| Vec3::new(v.x - cx, v.y, v.z - cz))
+                .collect(),
+            indices: part.indices.clone(),
+            color: part.color,
+            vcolors: vec![],
+            uv: part.uv.clone(),
+            tex: part.tex,
+        });
     }
 
     // junction patches (crossings, roundabouts) — only when no GLB prefab
@@ -959,6 +1002,15 @@ pub fn render_scene_env_shaded(
     extra: &[PropDraw],
     shade: ShadeMode,
 ) -> Vec<u8> {
+    // Quality = 2× SSAA supersampled Solid
+    if shade == ShadeMode::Quality {
+        let big = render_scene_shaded(
+            scene, library, textures, cam, w * 2, h * 2, env.clear, extra, ShadeMode::Solid,
+        );
+        let mut rgba = crate::raster::box_downsample(&big, w * 2, h * 2, 2);
+        paint_sky(&mut rgba, w, h, cam.pitch, env);
+        return rgba;
+    }
     let mut rgba = render_scene_shaded(scene, library, textures, cam, w, h, env.clear, extra, shade);
     paint_sky(&mut rgba, w, h, cam.pitch, env);
     rgba
@@ -1061,6 +1113,10 @@ fn draw_all(
     // distance fog measured from the CAMERA: content near the orbit target
     // stays clear, the far roads fade into the background
     frame.set_fog(cam.dist + scene.radius_m * 0.55, cam.dist + scene.radius_m * 3.4, bg);
+    frame.depth_range = (
+        (cam.dist - scene.radius_m * 0.3).max(2.0),
+        cam.dist + scene.radius_m * 3.4,
+    );
     let view = cam.view();
     let proj = cam.proj(frame.w as f32 / frame.h.max(1) as f32);
     let light = Vec3::new(0.4, 0.85, 0.3).normalized();

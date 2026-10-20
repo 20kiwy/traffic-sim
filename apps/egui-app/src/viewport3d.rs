@@ -39,7 +39,8 @@ pub fn ensure_scene(app: &mut RoadkitApp) {
             })
             .collect();
         let terrain = sc.terrain.clone();
-        let scene = roadkit::scene::build_scene_full(
+        let enrich = sc.enrich.clone();
+        let scene = roadkit::scene::build_scene_enriched(
             &visible_curves,
             &sc.junctions,
             &sc.props,
@@ -48,6 +49,8 @@ pub fn ensure_scene(app: &mut RoadkitApp) {
             app.render.show_grid,
             app.render.show_lanes,
             Some(&terrain),
+            roadkit::ENV_DAY.clear_rgb(),
+            &enrich,
         );
         let radius = scene.radius_m;
         drop(sc);
@@ -136,6 +139,9 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     (roadkit::raster::ShadeMode::Solid, "solid"),
                     (roadkit::raster::ShadeMode::Normals, "normals"),
                     (roadkit::raster::ShadeMode::Wireframe, "wire"),
+                    (roadkit::raster::ShadeMode::ShadedWire, "shaded+w"),
+                    (roadkit::raster::ShadeMode::Depth, "depth"),
+                    (roadkit::raster::ShadeMode::Quality, "quality"),
                 ] {
                     let on = app.render.shading == mode;
                     if ui

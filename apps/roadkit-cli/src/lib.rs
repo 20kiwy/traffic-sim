@@ -112,6 +112,20 @@ pub fn render_view_opt(
 /// Same + traffic simulation: runs `sim_seconds` of deterministic traffic
 /// before rendering (vehicles queued at red signals show it working).
 #[allow(clippy::too_many_arguments)]
+/// Viewport shading override for camera snapshots: ROADKIT_SHADE env
+/// (solid | normals | wire | shadedwire | depth | quality) — the Blender
+/// style modes from docs/ROADARCHITECT.md §10.
+pub fn shade_from_env() -> roadkit::raster::ShadeMode {
+    match std::env::var("ROADKIT_SHADE").unwrap_or_default().to_lowercase().as_str() {
+        "normals" => roadkit::raster::ShadeMode::Normals,
+        "wire" | "wireframe" => roadkit::raster::ShadeMode::Wireframe,
+        "shadedwire" | "shaded_wire" | "shaded+w" => roadkit::raster::ShadeMode::ShadedWire,
+        "depth" => roadkit::raster::ShadeMode::Depth,
+        "quality" => roadkit::raster::ShadeMode::Quality,
+        _ => roadkit::raster::ShadeMode::Solid,
+    }
+}
+
 pub fn render_view_sim(
     world: &World,
     view: &str,
@@ -141,7 +155,7 @@ pub fn render_view_sim(
             }
             let scene = build_scene_with_bg(&world.scene.curves, &world.scene.junctions, &props, &world.library, true, roadkit::ENV_DAY.clear);
             if ss <= 1 {
-                return Ok(render_scene_env(&scene, &world.library, &world.textures, &cam, w, h, roadkit::ENV_DAY, &[]));
+                return Ok(roadkit::render_scene_env_shaded(&scene, &world.library, &world.textures, &cam, w, h, roadkit::ENV_DAY, &[], shade_from_env()));
             }
             let big = render_scene_env(
                 &scene,
@@ -698,8 +712,9 @@ pub fn render_dsm(
     density: f64,
 ) -> Result<Vec<String>, String> {
     let mut outs = Vec::new();
-    // whole-corridor plan view (raw coordinates)
-    {
+    // whole-corridor plan view (raw coordinates) — multi-site runs only
+    // (single-site --dsm-site renders skip it)
+    if sites.len() > 1 {
         let dsm_full = roadkit::build_dsm();
         let mut st = SceneState::default();
         st.curves = dsm_full.curves.clone();
@@ -732,7 +747,7 @@ pub fn render_dsm(
             let (cx, cz, _, _) = roadkit::scene_recenter(&dsm.curves);
             cam.target = gdmath::vec3::Vec3::new(-cx, 0.0, -cz);
         }
-        let mut props: Vec<roadkit::PropInstance> = Vec::new();
+        let mut props: Vec<roadkit::PropInstance> = roadkit::dsm::dsm_props_capped(&dsm.curves, 720.0);
         if sim_seconds > 0.0 {
             let mut sim = roadkit::TrafficSim::new(
                 &dsm.curves,
@@ -744,15 +759,35 @@ pub fn render_dsm(
             for _ in 0..steps {
                 sim.step(0.1, &dsm.curves);
             }
-            props = sim.prop_instances(&dsm.curves);
+            props.extend(sim.prop_instances(&dsm.curves));
         }
-        let scene = build_scene_with_bg(&dsm.curves, &junctions, &props, &library, true, roadkit::ENV_DAY.clear);
+        let enrich = roadkit::dsm::dsm_buildings(&dsm.curves);
+        let scene = roadkit::scene::build_scene_enriched(
+            &dsm.curves,
+            &junctions,
+            &props,
+            &[],
+            &library,
+            true,
+            false,
+            None,
+            roadkit::ENV_DAY.clear_rgb(),
+            &enrich,
+        );
         eprintln!("[dsm] {name}: cam.dist={:.0} radius={:.0} curves={} junctions={} lights={}", cam.dist, scene.radius_m, dsm.curves.len(), junctions.len(), dsm.registry.entries.len());
-        let rgba = if ss > 1 {
-            let big = render_scene_env(&scene, &library, &textures, &cam, w as usize * ss, h as usize * ss, roadkit::ENV_DAY, &[]);
-            box_downsample(&big, w as usize * ss, h as usize * ss, ss)
+        let shade = shade_from_env();
+        let (rw, rh) = if shade == roadkit::raster::ShadeMode::Quality {
+            (w as usize, h as usize) // Quality does its own 2x SSAA
+        } else if ss > 1 {
+            (w as usize * ss, h as usize * ss)
         } else {
-            render_scene_env(&scene, &library, &textures, &cam, w as usize, h as usize, roadkit::ENV_DAY, &[])
+            (w as usize, h as usize)
+        };
+        let big = roadkit::render_scene_env_shaded(&scene, &library, &textures, &cam, rw, rh, roadkit::ENV_DAY, &[], shade);
+        let rgba = if rw != w as usize {
+            box_downsample(&big, rw, rh, rw / w as usize)
+        } else {
+            big
         };
         let out = std::path::PathBuf::from(format!("dsm_{name}.png"));
         encode_png(&out, &rgba, w, h)?;
@@ -783,7 +818,20 @@ pub fn render_dsm_appcam(w: u32, h: u32) -> Result<(), String> {
     let assets = find_assets_dir_cwd()?;
     let library = AssetLibrary::load_dir(&assets);
     let textures = TextureLibrary::load_dir(&assets.join("textures"));
-    let scene = build_scene_with_bg(&dsm.curves, &junctions, &[], &library, true, roadkit::ENV_DAY.clear);
+    let props = roadkit::dsm::dsm_props_capped(&dsm.curves, 720.0);
+    let enrich = roadkit::dsm::dsm_buildings(&dsm.curves);
+    let scene = roadkit::scene::build_scene_enriched(
+        &dsm.curves,
+        &junctions,
+        &props,
+        &[],
+        &library,
+        true,
+        false,
+        None,
+        roadkit::ENV_DAY.clear_rgb(),
+        &enrich,
+    );
     eprintln!("[appcam] scene.radius={} center=({cx},{cz})", scene.radius_m);
     let cam = OrbitCam {
         zoom_vel: 0.0,

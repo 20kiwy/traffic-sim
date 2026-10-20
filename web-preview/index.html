@@ -18,26 +18,90 @@
                  animation: slide 1.1s ease-in-out infinite alternate; }
   @keyframes slide { from { margin-left: 0; } to { margin-left: 60%; } }
   #boot.err { color: #f06a52; pointer-events: auto; white-space: pre-wrap; }
+  /* scene launcher (hidden once the engine boots) */
+  #launcher {
+    position: fixed; inset: 0; z-index: 2; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px;
+    background: radial-gradient(1200px 700px at 50% 30%, #1d2129 0%, #14161b 70%);
+    font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace; color: #c8cdd4;
+  }
+  #launcher h1 { font-size: 20px; font-weight: 600; letter-spacing: .04em; margin: 0; color: #f06a52; }
+  #launcher p { margin: 0 0 4px; color: #7d8590; max-width: 560px; }
+  #launcher .grid { display: grid; grid-template-columns: repeat(3, minmax(150px, 200px)); gap: 10px; }
+  #launcher button {
+    appearance: none; border: 1px solid #333945; background: #1b1f27; color: #d7dce3;
+    font: inherit; padding: 12px 10px; border-radius: 8px; cursor: pointer;
+    display: flex; flex-direction: column; gap: 3px; align-items: flex-start; text-align: left;
+    transition: border-color .15s, background .15s, transform .06s;
+  }
+  #launcher button:hover { border-color: #f06a52; background: #232833; }
+  #launcher button:active { transform: translateY(1px); }
+  #launcher button b { font-size: 13px; color: #f2f4f7; font-weight: 600; }
+  #launcher button span { font-size: 11px; color: #8a93a0; }
+  #launcher .foot { font-size: 11px; color: #5d6570; margin-top: 6px; }
+  @media (max-width: 640px) { #launcher .grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); } }
 </style>
 </head>
 <body>
-<div id="boot">
-  <div>loading roadkit engine (wasm ~8 MB — props + textures embedded)</div>
+<div id="boot" style="display:none">
+  <div>loading roadkit engine (wasm — props + textures embedded)</div>
   <div class="bar"><i></i></div>
   <div>the SAME editor as the native build — WebGL2 via glow</div>
+</div>
+<div id="launcher">
+  <h1>RoadKit — Dar es Salaam engine preview</h1>
+  <p>The full egui editor compiled to WASM (WebGL2). Pick a JICA scenario —
+     Kijazi &amp; Tazara flyovers, BRT corridors, signal plans, lane-accurate
+     traffic (LHT), procedural city blocks — or the demo scene.</p>
+  <div class="grid">
+    <button data-scene="kijazi"><b>Kijazi Interchange</b><span>Morogoro × Mandela × Sam Nujoma — split flyover + BRT Ph-1</span></button>
+    <button data-scene="tazara"><b>Tazara Intersection</b><span>Fig 5.3.10 flyover — 300 m box girder, 4-phase 120 s</span></button>
+    <button data-scene="igesa"><b>Sam Nujoma × Igesa</b><span>Sinza at-grade, BRT Phase 4 rebuild</span></button>
+    <button data-scene="gerezani"><b>Gerezani / Bandari</b><span>BRT flyover + 6-lane port corridor</span></button>
+    <button data-scene="mwenge"><b>Mwenge Intersection</b><span>Fig 5.5.1 priority site — market blocks</span></button>
+    <button data-scene="selanda"><b>Selanda Bridge</b><span>Mandela × Kilwa — bridge + corridor</span></button>
+    <button data-scene="dsm"><b>Full DSM corridor</b><span>All 9 km — every Fig 5.5.1 site at once</span></button>
+    <button data-scene="demo"><b>Demo city grid</b><span>The scripted GRG demo road scene</span></button>
+  </div>
+  <div class="foot">deep links: ?scene=kijazi · ?scene=tazara · ?scene=dsm&amp;radius=900 · keyboard WASD/arrows, scroll = zoom</div>
 </div>
 <canvas id="roadkit-canvas" tabindex="-1"></canvas>
 <script type="module">
   const boot = document.getElementById('boot');
-  try {
-    const mod = await import('./egui_app.js');
-    await mod.default();                    // init(): fetch + instantiate egui_app_bg.wasm
-    await mod.start('roadkit-canvas');      // boot eframe on the canvas
-    boot.remove();
-  } catch (e) {
-    boot.classList.add('err');
-    boot.textContent = 'failed to start: ' + (e && (e.message || e.toString()));
-    console.error(e);
+  const launcher = document.getElementById('launcher');
+  const params = new URLSearchParams(location.search);
+
+  function setQuery(scene) {
+    params.set('scene', scene);
+    const q = params.toString();
+    history.replaceState(null, '', location.pathname + (q ? '?' + q : ''));
+  }
+
+  async function boot_engine() {
+    launcher.style.display = 'none';
+    boot.style.display = 'flex';
+    try {
+      const mod = await import('./egui_app.js');
+      await mod.default();                    // init(): fetch + instantiate egui_app_bg.wasm
+      await mod.start('roadkit-canvas');      // boot eframe on the canvas (reads ?scene=)
+      boot.remove();
+    } catch (e) {
+      boot.classList.add('err');
+      boot.textContent = 'failed to start: ' + (e && (e.message || e.toString()));
+      console.error(e);
+    }
+  }
+
+  // Deep link (?scene=...) boots immediately; otherwise wait for a click.
+  if (params.get('scene')) {
+    boot_engine();
+  } else {
+    launcher.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-scene]');
+      if (!btn) return;
+      setQuery(btn.dataset.scene);
+      boot_engine();
+    });
   }
 </script>
 </body>

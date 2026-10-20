@@ -122,6 +122,7 @@ impl AssetLibrary {
             ("milestone", "route marker", include_bytes!("../../../assets/glb/milestone.glb")),
             ("streetlight", "furniture", include_bytes!("../../../assets/glb/streetlight.glb")),
             ("tree", "roadside vegetation", include_bytes!("../../../assets/glb/tree.glb")),
+            ("palm", "roadside vegetation — coconut palm", include_bytes!("../../../assets/glb/palm.glb")),
             ("vehicle", "traffic prop", include_bytes!("../../../assets/glb/vehicle.glb")),
             ("car_sedan", "JICA fleet — private car", include_bytes!("../../../assets/glb/car_sedan.glb")),
             ("daladala", "JICA fleet — daladala minibus", include_bytes!("../../../assets/glb/daladala.glb")),

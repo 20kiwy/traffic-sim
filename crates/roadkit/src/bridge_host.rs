@@ -65,6 +65,9 @@ pub struct SceneState {
     pub lanes_editable: bool,
     /// the RoadTerrain3DConnector (terrain hills + flatten-under-roads)
     pub terrain: TerrainState,
+    /// R11 enrichment geometry (procedural buildings — world space),
+    /// appended to the road mesh parts at scene build time
+    pub enrich: Vec<roads::mesh3d::MeshPart>,
 }
 
 impl Clone for SceneState {
@@ -83,6 +86,7 @@ impl Clone for SceneState {
             lanes: self.lanes.clone(),
             lanes_editable: self.lanes_editable,
             terrain: self.terrain.clone(),
+            enrich: Vec::new(),
         }
     }
 }
@@ -98,6 +102,7 @@ impl SceneState {
     pub fn clear(&mut self) {
         self.curves.clear();
         self.props.clear();
+        self.enrich.clear();
         self.junctions.clear();
         self.lanes.clear();
         self.dirty = true;

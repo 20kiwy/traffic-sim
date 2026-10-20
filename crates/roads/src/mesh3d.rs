@@ -98,6 +98,15 @@ pub const TEX_CEMENT: i32 = 5;
 pub const TEX_MUD: i32 = 6;
 pub const TEX_ROUGH: i32 = 7;
 pub const TEX_TACTILE: i32 = 8;
+// RoadArchitect texture slots (must match roadkit::textures)
+pub const TEX_RA_ASPHALT: i32 = 9;
+pub const TEX_RA_CONCRETE: i32 = 10;
+pub const TEX_RA_GALV: i32 = 11;
+pub const TEX_RA_WBEAM: i32 = 12;
+pub const TEX_RA_RAILING: i32 = 13;
+pub const TEX_RA_BRICK: i32 = 14;
+pub const TEX_RA_COBBLE: i32 = 15;
+pub const TEX_WINDOWS: i32 = 16;
 
 pub const ROAD_TINT: [f32; 4] = [1.55, 1.55, 1.55, 1.0];
 pub const CONCRETE_TINT: [f32; 4] = [1.35, 1.35, 1.35, 1.0];
@@ -1341,6 +1350,187 @@ pub fn joint_parts(curve: &RoadCurve, span_starts: &[f64]) -> Vec<MeshPart> {
         part.positions.push(Vec3::new(x0, p.y + 0.05 + w, z0));
         part.uv.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
         part.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    parts.push(part);
+    parts
+}
+
+/* ---------------- RoadArchitect extrusions (R11) ---------------- */
+
+/// One extrusion sample frame: center position + left-edge point +
+/// left normal (same basis `build_parts` sweeps with).
+struct Frame {
+    p: Vec3,
+    nx: f32,
+    nz: f32,
+    yaw: f32,
+}
+
+/// Sweep a closed 2D profile `[(dx, dy), ...]` (dx = outward from the edge
+/// point, dy = up) along the road edge — the Rust equivalent of RA's
+/// `SplinatedMeshMaker` chaining (tangent-aligned, zero-gap, UV tiled by
+/// arc length so every texture repeat matches RA's per-instance tiling).
+fn sweep_extrusion(
+    part: &mut MeshPart,
+    frames: &[Frame],
+    side: f32,
+    edge_off: f64,
+    profile: &[(f32, f32)],
+    uv_tile_m: f32,
+) {
+    if frames.len() < 2 {
+        return;
+    }
+    let n_prof = profile.len();
+    let mut arc = 0.0f32;
+    let mut prev_ring: Option<Vec<u32>> = None;
+    for (i, f) in frames.iter().enumerate() {
+        if i > 0 {
+            let g = frames[i - 1].p;
+            arc += (f.p.x - g.x).hypot(f.p.z - g.z);
+        }
+        // profile ring vertices
+        let mut ring = Vec::with_capacity(n_prof);
+        for (dx, dy) in profile {
+            // outward direction = left normal * side; dx also extends outward
+            let ox = f.nx * side;
+            let oz = f.nz * side;
+            let x = f.p.x + ox * (edge_off as f32) - oz * dx;
+            let z = f.p.z + oz * (edge_off as f32) + ox * dx;
+            ring.push(part.positions.len() as u32);
+            part.positions.push(Vec3::new(x, f.p.y + *dy, z));
+            let u = arc / uv_tile_m.max(0.05);
+            part.uv.push([u, *dy * 0.5]);
+        }
+        if let Some(prev) = prev_ring.take() {
+            for k in 0..n_prof {
+                let k1 = (k + 1) % n_prof;
+                // skip the degenerate closing quad if profile is open (first==last)
+                if k == n_prof - 1 && profile[0] == profile[n_prof - 1] {
+                    break;
+                }
+                part.indices.extend_from_slice(&[prev[k], ring[k], ring[k1], prev[k], ring[k1], prev[k1]]);
+            }
+        }
+        prev_ring = Some(ring);
+    }
+}
+
+/// RoadArchitect `GSDWBeam1L/R` (GSDWBeam2.FBX + GSDGalv material):
+/// corrugated W-beam guardrail on blade posts along both road edges.
+/// Emits where `RoadCurve.guardrail` is set (flyover approaches,
+/// embankments, BRT corridors) and skips the elevated deck itself
+/// (that carries the concrete parapet from `railing_parts`).
+pub fn guardrail_parts(curve: &RoadCurve) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if !curve.guardrail {
+        return parts;
+    }
+    let pts = curve.centerline(4.0);
+    if pts.len() < 2 {
+        return parts;
+    }
+    // W-beam section: vertical band 0.31 m tall, top edge 0.55 m above the
+    // pavement; the corrugation lives in the ra_wbeam texture (U-tiled).
+    let beam = [
+        (0.0f32, 0.55f32),
+        (0.035, 0.55),
+        (0.035, 0.24),
+        (0.0, 0.24),
+    ];
+    let mut beam_part = MeshPart::new([1.45, 1.45, 1.45, 1.0]); // bright galv
+    beam_part.tex = TEX_RA_WBEAM;
+    let mut post_part = MeshPart::new(rgb([96, 100, 106], 1.0));
+    let half = curve.paved_width() / 2.0;
+    for side in [-1.0f32, 1.0] {
+        // frames: ground samples only (the elevated deck carries parapets
+        // from railing_parts instead) — normals from the ORIGINAL sample
+        // neighbors so skipped deck samples don't distort the frame
+        let mut frames: Vec<(usize, Frame)> = Vec::new();
+        for (i, p) in pts.iter().enumerate() {
+            if p.y > 1.2 {
+                continue;
+            }
+            frames.push((i, Frame { p: *p, nx: 0.0, nz: 0.0, yaw: 0.0 }));
+        }
+        for (idx, f) in frames.iter_mut() {
+            let a = if *idx > 0 { &pts[*idx - 1] } else { &pts[*idx] };
+            let b = if *idx + 1 < pts.len() { &pts[*idx + 1] } else { &pts[*idx] };
+            let (dx, dz) = (b.x - a.x, b.z - a.z);
+            let l = dx.hypot(dz).max(1e-6);
+            f.nx = -(dz / l) as f32;
+            f.nz = (dx / l) as f32;
+            f.yaw = dz.atan2(dx);
+        }
+        let frames: Vec<Frame> = frames.into_iter().map(|(_, f)| f).collect();
+        if frames.len() < 2 {
+            continue;
+        }
+        sweep_extrusion(&mut beam_part, &frames, side, half + 0.55, &beam, 0.5);
+        // blade posts every 4 m (sample cadence)
+        for (i, f) in frames.iter().enumerate() {
+            if i % 2 != 0 {
+                continue;
+            }
+            let ox = f.nx * side;
+            let oz = f.nz * side;
+            let px = f.p.x + ox * (half + 0.55) as f32;
+            let pz = f.p.z + oz * (half + 0.55) as f32;
+            let base = post_part.positions.len() as u32;
+            let (tx, tz) = (px - oz * 0.06, pz + ox * 0.06);
+            post_part.positions.push(Vec3::new(px, f.p.y - 0.25, pz));
+            post_part.positions.push(Vec3::new(px, f.p.y + 0.56, pz));
+            post_part.positions.push(Vec3::new(tx, f.p.y - 0.25, tz));
+            post_part.positions.push(Vec3::new(tx, f.p.y + 0.56, tz));
+            post_part.uv.extend_from_slice(&[[0.0, 0.0], [0.0, 1.0], [0.3, 0.0], [0.3, 1.0]]);
+            post_part.indices.extend_from_slice(&[base, base + 1, base + 3, base, base + 3, base + 2]);
+        }
+    }
+    parts.push(beam_part);
+    parts.push(post_part);
+    parts
+}
+
+/// RoadArchitect `KRail` (GSDBarrier-KRail.prefab + GSDConcrete2): jersey
+/// barrier trapezoid swept along BOTH median edges on BRT concrete medians
+/// (median >= BRT_MEDIAN_M) — the busway wall.
+pub fn krail_parts(curve: &RoadCurve) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    let Some(first) = curve.points.first() else { return parts };
+    if first.median < BRT_MEDIAN_M {
+        return parts;
+    }
+    let pts = curve.centerline(4.0);
+    if pts.len() < 2 {
+        return parts;
+    }
+    // jersey profile (closed loop): base half-width 0.30, top half-width 0.09
+    let prof = [
+        (0.30f32, 0.0f32),
+        (0.09, 0.62),
+        (-0.09, 0.82),
+        (-0.09, 0.82), // top cap (flat)
+        (-0.30, 0.0),
+        (0.30, 0.0), // close along the ground
+    ];
+    let mut part = MeshPart::new(CONCRETE_TINT);
+    part.tex = TEX_RA_CONCRETE;
+    let med_half = first.median / 2.0;
+    for side in [-1.0f32, 1.0] {
+        let mut frames = Vec::new();
+        for p in &pts {
+            frames.push(Frame { p: *p, nx: 0.0, nz: 0.0, yaw: 0.0 });
+        }
+        for (i, f) in frames.iter_mut().enumerate() {
+            let a = if i > 0 { &pts[i - 1] } else { &pts[i] };
+            let b = if i + 1 < pts.len() { &pts[i + 1] } else { &pts[i] };
+            let (dx, dz) = (b.x - a.x, b.z - a.z);
+            let l = dx.hypot(dz).max(1e-6);
+            f.nx = -(dz / l) as f32;
+            f.nz = (dx / l) as f32;
+            f.yaw = dz.atan2(dx);
+        }
+        sweep_extrusion(&mut part, &frames, side, med_half + 0.05, &prof, 2.0);
     }
     parts.push(part);
     parts
