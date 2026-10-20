@@ -1,5 +1,6 @@
-//! The VectorCraft-style chrome: app bar (32) · control bar (34) · left tool
-//! rail (64) · central doc tabs. Status/hint bars live in statusbar.rs.
+//! The Terrazon-style chrome: app bar (32) · control bar (34, tools live
+//! here now) · central doc tabs. Status/hint bars live in statusbar.rs.
+//! (The old 64 px left tool rail is removed — panels read cleaner.)
 //!
 //! LAYOUT BUG FIXED: the panel Ui is `top_down`; two bare `ui.with_layout`
 //! calls stacked VERTICALLY — the right-aligned controls landed on an
@@ -14,7 +15,6 @@ use egui_kit::IconName;
 
 pub const APP_BAR_H: f32 = 32.0;
 pub const CONTROL_H: f32 = 34.0;
-pub const TOOLBAR_W: f32 = 64.0;
 pub const DOC_TAB_H: f32 = 35.0;
 
 /* ------------------------------------------------------------------ */
@@ -103,6 +103,10 @@ pub fn app_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
                 });
                 roads_menu(app, ui);
                 ui.menu_button(RichText::new("Help").size(12.0), |ui| {
+                    if ui.button("Road node structure").on_hover_text("What is the RoadManager, a RoadContainer, a RoadPoint, a RoadLane?").clicked() {
+                        app.show_nodes_help = true;
+                        ui.close_menu();
+                    }
                     if ui.button(".gd scripting API").clicked() {
                         app.show_api = true;
                         ui.close_menu();
@@ -271,7 +275,14 @@ pub fn control_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                // tool label (semibold, like the selection label in VectorCraft)
+                // tools — the old left rail's four tools, now inline like the
+                // Terrazon top bar (icon + hotkey chip, fixed 48 px each —
+                // icon_button_caption would eat the whole row width here)
+                tool_chip(ui, app, Tool::Select, IconName::Cursor);
+                tool_chip(ui, app, Tool::AddPoint, IconName::Point);
+                tool_chip(ui, app, Tool::Stamp, IconName::Stamp);
+                tool_chip(ui, app, Tool::Pan, IconName::Hand);
+                ui.separator();
                 ui.label(RichText::new(app.tool.label()).strong().size(12.0).color(t.text_strong));
                 ui.separator();
 
@@ -363,75 +374,36 @@ pub fn control_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
         });
 }
 
-/* ------------------------------------------------------------------ */
-/* Tool rail — 64px, icon + text caption per tool                      */
-/* ------------------------------------------------------------------ */
-
-pub fn tool_rail(app: &mut RoadkitApp, ctx: &egui::Context) {
-    let t = egui_kit::tokens(ctx);
-    egui::SidePanel::left("tool_rail")
-        .exact_width(TOOLBAR_W)
-        .resizable(false)
-        .frame(egui::Frame::none().fill(t.app_bar))
-        .show(ctx, |ui| {
-            egui_kit::card(
-                ui,
-                egui::Margin {
-                    left: 6.0,
-                    right: 6.0,
-                    top: 6.0,
-                    bottom: 6.0,
-                },
-                |ui| {
-                    ui.add_space(2.0);
-                    tool_button(ui, app, Tool::Select, IconName::Cursor, "Select", "Select / move RoadPoints (V)");
-                    tool_button(ui, app, Tool::AddPoint, IconName::Point, "Add", "Add RoadPoint (A) — click the plan");
-                    tool_button(ui, app, Tool::Stamp, IconName::Stamp, "Stamp", "Stamp the selected GLB prop (P)");
-                    tool_button(ui, app, Tool::Pan, IconName::Hand, "Pan", "Pan the 2D plan (H)");
-                    ui.add_space(4.0);
-                    rail_separator(ui, &t);
-                    ui.add_space(2.0);
-                    if egui_kit::icon_button_caption(ui, IconName::Grid, false, "Fit", "Fit scene (F)").clicked() {
-                        let _ = actions::perform(app, "fit_scene");
-                    }
-                    if egui_kit::icon_button_caption(ui, IconName::Play, false, "Run", "Run script (F5)").clicked() {
-                        let _ = actions::perform(app, "run_script");
-                    }
-                    // bottom: doc tabs
-                    ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                        for (tab, icon, cap) in
-                            [(Tab::Plan, IconName::Road, "2D"), (Tab::Scene3d, IconName::Box, "3D")]
-                        {
-                            let sel = app.tab == tab;
-                            if egui_kit::icon_button_caption(
-                                ui,
-                                icon,
-                                sel,
-                                cap,
-                                if tab == Tab::Plan { "2D plan editor" } else { "3D scene render" },
-                            )
-                            .clicked()
-                            {
-                                app.tab = tab;
-                            }
-                        }
-                    });
-                },
-            );
-        });
-}
-
-fn rail_separator(ui: &mut egui::Ui, t: &egui_kit::Tokens) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(40.0, 1.0), egui::Sense::hover());
-    ui.painter().line_segment([rect.left_center(), rect.right_center()], egui::Stroke::new(1.0, t.divider));
-}
-
-fn tool_button(ui: &mut egui::Ui, app: &mut RoadkitApp, tool: Tool, icon: IconName, caption: &str, tip: &str) {
-    let selected = app.tool == tool;
-    let resp = egui_kit::icon_button_caption(ui, icon, selected, caption, tip);
+/// One compact tool toggle for the control bar: icon + hotkey letter in a
+/// fixed 48×26 chip (the control bar is only 34 px tall — the rail's
+/// icon_button_caption is 40 px tall AND eats available_width, so the bar
+/// needs its own widget).
+fn tool_chip(ui: &mut egui::Ui, app: &mut RoadkitApp, tool: Tool, icon: IconName) {
+    let t = egui_kit::tokens(ui.ctx());
+    let sel = app.tool == tool;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(48.0, 26.0), egui::Sense::click());
+    if sel {
+        ui.painter().rect_filled(rect, 5.0, t.tool_active);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 5.0, t.hover);
+    }
+    egui_kit::paint(
+        ui,
+        icon,
+        egui::Rect::from_center_size(egui::pos2(rect.left() + 14.0, rect.center().y), egui::vec2(14.0, 14.0)),
+        if sel { t.text_strong } else { t.icon },
+    );
+    ui.painter().text(
+        egui::pos2(rect.right() - 10.0, rect.center().y),
+        egui::Align2::CENTER_CENTER,
+        tool.hotkey(),
+        egui::FontId::monospace(9.5),
+        if sel { t.text_strong } else { t.text_dim },
+    );
     if resp.clicked() {
         app.tool = tool;
     }
+    resp.on_hover_text(tool.label());
 }
 
 /* ------------------------------------------------------------------ */

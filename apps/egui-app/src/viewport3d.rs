@@ -87,6 +87,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 ui.toggle_value(&mut app.render.show_grid, "grid").on_hover_text("Show the TerraZone ground grid — clean screen-space reference lines hugging the engine terrain");
                 ui.toggle_value(&mut app.render.show_props, "props").on_hover_text("Show GLB props");
                 ui.toggle_value(&mut app.render.show_lanes, "lanes").on_hover_text("Show the generated AI RoadLanes (GRG draw_lanes)");
+                ui.toggle_value(&mut app.render.show_points, "points").on_hover_text("Show every RoadPoint as a clickable marker — click one to select it and see its red X / green Y / blue Z axis lines (Terrazon gizmo)");
                 ui.toggle_value(&mut app.render.spin, "spin").on_hover_text("Auto-orbit the camera");
                 if ui
                     .toggle_value(&mut app.render.sim_on, "traffic")
@@ -221,6 +222,14 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 draw_ground_grid(app, ui, rect, &scene);
             }
 
+            // ---- RoadPoint markers: click to select, XYZ tripod on the
+            //      selection (Terrazon point gizmo) ----
+            let point_hit: Option<(usize, usize)> = if app.render.show_points {
+                draw_point_markers(app, ui, rect, &scene, &response)
+            } else {
+                None
+            };
+
             // ---- interaction ----
             let shift = ctx.input(|i| i.modifiers.shift);
             let secondary = ctx.input(|i| i.pointer.secondary_down());
@@ -286,7 +295,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             );
 
             // ---- Godot-style axis gizmo (top-right, pure overlay) ----
-            draw_axis_gizmo(app, ui, rect, &response);
+            draw_axis_gizmo(app, ui, rect, &response, point_hit.is_none());
         });
 }
 
@@ -309,6 +318,7 @@ fn frame_sig(app: &RoadkitApp, w: usize, h: usize, extra: usize) -> u64 {
     app.render.show_grid.hash(&mut hsh);
     app.render.show_props.hash(&mut hsh);
     app.render.show_lanes.hash(&mut hsh);
+    app.render.show_points.hash(&mut hsh);
     w.hash(&mut hsh);
     h.hash(&mut hsh);
     extra.hash(&mut hsh);
@@ -335,7 +345,7 @@ struct AxisEntry {
 /// the Godot viewport widget: +Y top, +X lower-right, +Z lower-left, dim
 /// negatives opposite. Clicking a circle snaps the orbit camera onto that
 /// axis (looking at the target); dragging anywhere on the widget orbits.
-fn draw_axis_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, response: &egui::Response) {
+fn draw_axis_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, allow_click: bool) {
     const R: f32 = 40.0; // axis circle distance from the center
     const CR: f32 = 9.5; // circle radius (hit radius +2)
 
@@ -476,8 +486,9 @@ fn draw_axis_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, respon
         );
     }
 
-    // click-to-snap (drag anywhere on the widget orbits via the rect drag)
-    if response.clicked() {
+    // click-to-snap (drag anywhere on the widget orbits via the rect drag);
+    // skipped when the click just picked a RoadPoint marker
+    if allow_click && response.clicked() {
         if let Some(p) = response.interact_pointer_pos() {
             let mut hit: Option<&AxisEntry> = None;
             if ((p.x - center.x).powi(2) + (p.y - center.y).powi(2)).sqrt() <= 7.0 {
@@ -507,6 +518,238 @@ fn draw_axis_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, respon
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// RoadPoint markers — Terrazon point gizmo (click-to-select + XYZ tripod)
+// ---------------------------------------------------------------------------
+
+struct PtMarker {
+    pos: egui::Pos2,
+    depth: f32,
+    ci: usize,
+    pi: usize,
+    name: String,
+    cname: String,
+    wx: f64,
+    wy: f64,
+    wz: f64,
+    col: egui::Color32,
+    sel: bool,
+}
+
+/// Every visible RoadPoint gets a small clickable marker (coloured by its
+/// RoadContainer layer). The SELECTED point gets the Terrazon treatment:
+/// red X / green Y / blue Z world-axis lines through it + a name/coords
+/// label. Clicking a marker selects that RoadPoint (no dock hijack — the
+/// user opens Properties themselves); returns the pick for this frame.
+fn draw_point_markers(
+    app: &mut RoadkitApp,
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    scene: &roadkit::Scene,
+    response: &egui::Response,
+) -> Option<(usize, usize)> {
+    let cam = &app.cam;
+    let (w, h) = (rect.width(), rect.height());
+    let view = cam.view();
+    let proj = cam.proj(w / h);
+    // world (x, y, z) -> screen, exactly the raster's projection (the same
+    // transform the ground grid uses)
+    let xform = |x: f64, y: f64, z: f64| -> Option<(egui::Pos2, f32)> {
+        let v = view.transform_point(Vec3::new(x as f32, y as f32, z as f32)).0;
+        if v.z >= -0.05 {
+            return None; // behind / on the near plane
+        }
+        let iw = -1.0 / v.z;
+        let ndc_x = v.x * iw * proj.m[0];
+        let ndc_y = v.y * iw * proj.m[5];
+        Some((
+            egui::Pos2::new(
+                rect.min.x + (ndc_x * 0.5 + 0.5) * w,
+                rect.min.y + (1.0 - (ndc_y * 0.5 + 0.5)) * h,
+            ),
+            -v.z,
+        ))
+    };
+    // the raster's distance fog — markers ride the SAME fade as the roads
+    let fog_start = cam.dist + scene.radius_m * 0.55;
+    let fog_end = cam.dist + scene.radius_m * 3.4;
+    let fog = |depth: f32| 1.0 - ((depth - fog_start) / (fog_end - fog_start)).clamp(0.0, 1.0);
+
+    // ---- collect the visible points ----
+    let mut markers: Vec<PtMarker> = Vec::new();
+    {
+        let sc = app.scene.borrow();
+        for (ci, c) in sc.curves.iter().enumerate() {
+            if !c.visible {
+                continue; // layer eye
+            }
+            let col = egui::Color32::from_rgb(c.color[0], c.color[1], c.color[2]);
+            for (pi, p) in c.points.iter().enumerate() {
+                if !p.visible {
+                    continue; // point eye
+                }
+                let Some((pos, depth)) = xform(p.x, p.elev + 0.06, p.z) else {
+                    continue;
+                };
+                if pos.x < rect.left() - 8.0 || pos.x > rect.right() + 8.0 || pos.y < rect.top() - 8.0 || pos.y > rect.bottom() + 8.0 {
+                    continue;
+                }
+                let name = if p.name.is_empty() { format!("RP_{:03}", pi + 1) } else { p.name.clone() };
+                markers.push(PtMarker {
+                    pos,
+                    depth,
+                    ci,
+                    pi,
+                    name,
+                    cname: c.name.clone(),
+                    wx: p.x,
+                    wy: p.elev + 0.06,
+                    wz: p.z,
+                    col,
+                    sel: app.sel == Some((ci, pi)),
+                });
+            }
+        }
+    }
+    if markers.is_empty() {
+        return None;
+    }
+    // far first, the selected point re-sorted last so it draws on top
+    markers.sort_by(|a, b| b.depth.partial_cmp(&a.depth).unwrap_or(std::cmp::Ordering::Equal));
+    if let Some(i) = markers.iter().position(|m| m.sel) {
+        let m = markers.remove(i);
+        markers.push(m);
+    }
+
+    let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
+
+    // ---- draw (markers + the selected point's XYZ tripod) ----
+    for m in &markers {
+        let f = fog(m.depth);
+        if f < 0.06 && !m.sel {
+            continue; // fully fogged out
+        }
+        let r = (360.0 / m.depth).clamp(2.0, 6.0) + if m.sel { 2.0 } else { 0.0 };
+        let col = m.col.gamma_multiply(f.clamp(0.3, 1.0));
+        painter.circle_filled(m.pos, r, col);
+        painter.circle_stroke(m.pos, r, egui::Stroke::new(1.0, egui::Color32::from_black_alpha(170)));
+        if m.sel {
+            let t = egui_kit::tokens(ui.ctx());
+            // selection ring
+            painter.circle_stroke(m.pos, r + 3.5, egui::Stroke::new(1.6, t.accent));
+            // Terrazon XYZ lines: world axes through the point, foreshortened
+            // by the camera but never shorter than 30 px on screen
+            const L: f64 = 5.0;
+            for (axis, letter, col) in [
+                (Vec3::new(1.0, 0.0, 0.0), "X", egui::Color32::from_rgb(200, 60, 60)),
+                (Vec3::new(0.0, 1.0, 0.0), "Y", egui::Color32::from_rgb(140, 190, 50)),
+                (Vec3::new(0.0, 0.0, 1.0), "Z", egui::Color32::from_rgb(70, 120, 210)),
+            ] {
+                let Some((tip, _)) = xform(m.wx + axis.x as f64 * L, m.wy + axis.y as f64 * L, m.wz + axis.z as f64 * L) else {
+                    continue;
+                };
+                let mut dv = tip - m.pos;
+                let len = dv.length();
+                if len < 1e-3 {
+                    continue;
+                }
+                if len < 30.0 {
+                    dv = dv * (30.0 / len);
+                }
+                let end = m.pos + dv;
+                painter.line_segment([m.pos, end], egui::Stroke::new(2.0, col));
+                painter.text(
+                    end + dv.normalized() * 9.0,
+                    egui::Align2::CENTER_CENTER,
+                    letter,
+                    egui::FontId::proportional(11.5),
+                    col,
+                );
+            }
+            // name + world coords right at the point
+            painter.text(
+                m.pos + egui::vec2(r + 7.0, -(r + 7.0)),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{} · {}  ({:.1}, {:.1}, {:.1})", m.name, m.cname, m.wx, m.wy, m.wz),
+                egui::FontId::monospace(10.5),
+                egui::Color32::from_rgba_unmultiplied(240, 242, 248, 235),
+            );
+        }
+    }
+
+    // ---- hover tooltip (skipped for the selected point — its label + XYZ
+    //      tripod already identify it; two texts would ghost over each other)
+    let hover_pick = |app: &RoadkitApp, pointer: egui::Pos2| -> Option<PtPick> {
+        let mut best: Option<(f32, usize, usize, String, String, f64, f64, f64)> = None;
+        for m in &markers {
+            if m.sel {
+                continue;
+            }
+            let d = ((pointer.x - m.pos.x).powi(2) + (pointer.y - m.pos.y).powi(2)).sqrt();
+            let hit_r = (360.0 / m.depth).clamp(2.0, 6.0) + if m.sel { 2.0 } else { 0.0 } + 6.0;
+            if d <= hit_r && best.as_ref().map(|(bd, _, _, _, _, _, _, _)| d < *bd).unwrap_or(true) {
+                best = Some((d, m.ci, m.pi, m.name.clone(), m.cname.clone(), m.wx, m.wy, m.wz));
+            }
+        }
+        best.map(|(_, ci, pi, name, cname, wx, wy, wz)| PtPick { ci, pi, name, cname, wx, wy, wz })
+    };
+    if response.hovered() {
+        if let Some(p) = response.hover_pos() {
+            // don't ghost a neighbour tooltip over the selected point's own
+            // label — if the pointer is on the selected marker, it's labelled
+            let over_selected = markers.iter().any(|m| {
+                m.sel && {
+                    let r = (360.0 / m.depth).clamp(2.0, 6.0) + 7.0;
+                    ((p.x - m.pos.x).powi(2) + (p.y - m.pos.y).powi(2)).sqrt() <= r
+                }
+            });
+            if !over_selected {
+                if let Some(pick) = hover_pick(app, p) {
+                    painter.text(
+                        p + egui::vec2(12.0, -10.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        format!("{} · {}  ({:.1}, {:.1}, {:.1}) — click to select", pick.name, pick.cname, pick.wx, pick.wy, pick.wz),
+                        egui::FontId::monospace(10.5),
+                        egui::Color32::from_rgba_unmultiplied(235, 238, 245, 240),
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- click pick ----
+    if response.clicked() {
+        if let Some(p) = response.interact_pointer_pos() {
+            if let Some(pick) = hover_pick(app, p) {
+                let name = pick.name.clone();
+                let cname = pick.cname.clone();
+                let (wx, wy, wz) = (pick.wx, pick.wy, pick.wz);
+                app.select_point(pick.ci, pick.pi); // no dock hijack
+                app.status = format!("{name} selected — open Properties for its values");
+                app.scene.borrow_mut().log(format!(
+                    "[select] {name} · {cname} @ ({wx:.1}, {wy:.1}, {wz:.1}) — XYZ gizmo shown; Properties panel has the values"
+                ));
+                return Some((pick.ci, pick.pi));
+            }
+        }
+    }
+    None
+}
+
+struct PtPick {
+    ci: usize,
+    pi: usize,
+    name: String,
+    cname: String,
+    wx: f64,
+    wy: f64,
+    wz: f64,
+}
+
+fn painter_clip(ui: &egui::Ui, rect: egui::Rect) -> egui::Rect {
+    ui.clip_rect().intersect(rect)
 }
 
 // ---------------------------------------------------------------------------

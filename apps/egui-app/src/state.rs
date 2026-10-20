@@ -121,11 +121,15 @@ pub struct Panels {
 
 impl Default for Panels {
     fn default() -> Self {
-        Self { layers: true, properties: true, assets: true, script: false, console: false, history: false }
+        // Terrazon parity: only Layers + Properties docked; Assets/Script/
+        // Console/History live on the icon column until wanted.
+        Self { layers: true, properties: true, assets: false, script: false, console: false, history: false }
     }
 }
 
 impl Panels {
+    /// Terrazon-style right panel: Layers + Properties visible, the rest
+    /// reachable from the icon column (or popped out into windows).
     pub fn is_open(&self, tab: DockTab) -> bool {
         match tab {
             DockTab::Layers => self.layers,
@@ -160,6 +164,8 @@ pub struct RenderState {
     pub spin: bool,
     /// overlay the generated AI lanes (GRG draw_lanes) in 2D + 3D
     pub show_lanes: bool,
+    /// overlay clickable RoadPoint markers (+ XYZ tripod on the selection)
+    pub show_points: bool,
     /// per-intersection traffic simulation (vehicle agents + signals)
     pub sim: Option<roadkit::TrafficSim>,
     pub sim_on: bool,
@@ -181,6 +187,7 @@ impl Default for RenderState {
             show_props: true,
             spin: false,
             show_lanes: true,
+            show_points: true,
             sim: None,
             sim_on: false,
             sim_density: 14.0,
@@ -223,6 +230,11 @@ pub struct RoadkitApp {
     pub expanded: std::collections::HashSet<String>,
     /// layer panel search filter
     pub layer_search: String,
+    /// panels popped out of the dock into free-floating windows
+    /// (Terrazon detachable panels) — insertion order = window order
+    pub popped: Vec<DockTab>,
+    /// Help ▸ "Road node structure" explainer window
+    pub show_nodes_help: bool,
     /// UI look pickers
     pub brightness: Brightness,
     pub accent: Accent,
@@ -390,6 +402,8 @@ impl RoadkitApp {
             dock_collapsed: false,
             expanded: std::collections::HashSet::new(),
             layer_search: String::new(),
+            popped: Vec::new(),
+            show_nodes_help: false,
             brightness: Brightness::MediumDark,
             accent: Accent::Coral,
             script_idx: 0,
@@ -517,6 +531,61 @@ impl RoadkitApp {
         self.sel = None;
         self.sel_container = None;
         self.sel_junction = None;
+    }
+
+    /// Select a RoadPoint WITHOUT hijacking the dock: the tree stays where
+    /// the user is (Layers, Properties, a popped-out window…) and they open
+    /// Properties themselves when they want it.
+    pub fn select_point(&mut self, ci: usize, pi: usize) {
+        self.clear_selection();
+        self.sel = Some((ci, pi));
+    }
+
+    /// Select a whole RoadContainer without switching dock tabs.
+    pub fn select_container(&mut self, ci: usize) {
+        self.clear_selection();
+        self.sel_container = Some(ci);
+    }
+
+    /// Select a junction without switching dock tabs.
+    pub fn select_junction(&mut self, ji: usize) {
+        self.clear_selection();
+        self.sel_junction = Some(ji);
+    }
+
+    /* ---- Terrazon detachable panels -------------------------------- */
+
+    /// Detach a dock tab into a free-floating window.
+    pub fn pop_out(&mut self, tab: DockTab) {
+        if !self.popped.contains(&tab) {
+            self.popped.push(tab);
+            self.panels.set_open(tab, true);
+            // keep the dock on a tab that is still docked
+            if self.dock_tab == tab {
+                let next = self
+                    .panels
+                    .open_tabs()
+                    .into_iter()
+                    .find(|t| !self.popped.contains(t))
+                    .or_else(|| self.panels.open_tabs().first().copied());
+                if let Some(t) = next {
+                    self.dock_tab = t;
+                }
+            }
+            self.scene.borrow_mut().log(format!("[panel] '{}' popped out — drag it anywhere, the window button docks it back", tab.label()));
+        }
+    }
+
+    /// Dock a floating panel back into the right dock.
+    pub fn dock_back(&mut self, tab: DockTab) {
+        self.popped.retain(|t| *t != tab);
+        self.panels.set_open(tab, true);
+        self.dock_tab = tab;
+        self.scene.borrow_mut().log(format!("[panel] '{}' docked back into the right panel", tab.label()));
+    }
+
+    pub fn is_popped(&self, tab: DockTab) -> bool {
+        self.popped.contains(&tab)
     }
 
     /// Add a fresh 2-point RoadContainer near the plan view center.
@@ -1465,16 +1534,18 @@ impl eframe::App for RoadkitApp {
             self.fit_scene();
         }
 
-        // VectorCraft-style frame order: bars → tool rail → right dock →
-        // central doc tab + view → status/hint → dialogs.
+        // VectorCraft-style frame order: bars → right dock → central doc tab
+        // + view → status/hint → floating windows → dialogs. (The old left
+        // vertical tool rail is gone — Terrazon keeps its tools in the top
+        // control bar.)
         crate::chrome::app_bar(self, ctx);
         crate::chrome::control_bar(self, ctx);
-        crate::chrome::tool_rail(self, ctx);
         crate::panels::icon_column(self, ctx);
         crate::panels::dock(self, ctx);
         crate::chrome::central(self, ctx);
         crate::statusbar::status_bar(self, ctx);
         crate::statusbar::hint_bar(self, ctx);
+        crate::panels::floating_panels(self, ctx);
         crate::panels::dialogs(self, ctx);
 
         if self.render.spin {

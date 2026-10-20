@@ -1,6 +1,8 @@
-//! The right dock — VectorCraft-style closable panels:
-//! icon column (38 px) · dock (300 px, tab strip 33) ·
-//! Layers (the data-driven layer engine) · Properties · Assets · Script · Console.
+//! The right dock — Terrazon-style closable + DETACHABLE panels:
+//! icon column (46 px) · dock (300 px, tab strip 33) ·
+//! Layers (the data-driven layer engine) · Properties · Assets · Script ·
+//! Console · History — each tab can pop out into a free-floating window
+//! (`floating_panels`) and dock back.
 
 use crate::actions;
 use crate::state::{DockTab, MAX_LANES, RoadkitApp, ScriptStatus, Tool};
@@ -31,8 +33,9 @@ pub fn icon_column(app: &mut RoadkitApp, ctx: &egui::Context) {
                 |ui| {
                     ui.set_width(ui.available_width());
                     for tab in DockTab::ALL {
+                        let popped = app.is_popped(tab);
                         let open = app.panels.is_open(tab);
-                        let active = open && app.dock_tab == tab && !app.dock_collapsed;
+                        let active = popped || (open && app.dock_tab == tab && !app.dock_collapsed);
                         let resp = egui_kit::icon_button_caption(
                             ui,
                             tab.icon(),
@@ -41,7 +44,10 @@ pub fn icon_column(app: &mut RoadkitApp, ctx: &egui::Context) {
                             tab.label(),
                         );
                         if resp.clicked() {
-                            if open && app.dock_tab == tab && !app.dock_collapsed {
+                            if popped {
+                                // already a floating window — click the window itself to raise it
+                                app.status = format!("'{}' is popped out — click its window to raise it, X docks it back", tab.label());
+                            } else if open && app.dock_tab == tab && !app.dock_collapsed {
                                 app.panels.set_open(tab, false); // second click closes
                             } else {
                                 app.panels.set_open(tab, true);
@@ -64,9 +70,11 @@ pub fn dock(app: &mut RoadkitApp, ctx: &egui::Context) {
     if app.dock_collapsed || app.panels.open_tabs().is_empty() {
         return;
     }
-    // keep the active tab valid
-    if !app.panels.is_open(app.dock_tab) {
-        app.dock_tab = app.panels.open_tabs()[0];
+    // keep the active tab valid (and DOCKED — popped tabs live in windows)
+    if !app.panels.is_open(app.dock_tab) || app.is_popped(app.dock_tab) {
+        if let Some(next) = app.panels.open_tabs().into_iter().find(|t| !app.is_popped(*t)) {
+            app.dock_tab = next;
+        }
     }
     egui::SidePanel::right("dock")
         // FIXED width — the old resizable panel drifted wider after drags
@@ -86,12 +94,13 @@ pub fn dock(app: &mut RoadkitApp, ctx: &egui::Context) {
                         .id_source("dock_body")
                         .auto_shrink([false, false])
                         .show(ui, |ui| match app.dock_tab {
-                            DockTab::Layers => layers_content(app, ui),
-                            DockTab::Properties => properties_content(app, ui),
-                            DockTab::Assets => assets_content(app, ui),
-                            DockTab::Script => script_content(app, ui),
-                            DockTab::Console => console_content(app, ui),
-                            DockTab::History => history_content(app, ui),
+                            DockTab::Layers if !app.is_popped(DockTab::Layers) => layers_content(app, ui),
+                            DockTab::Properties if !app.is_popped(DockTab::Properties) => properties_content(app, ui),
+                            DockTab::Assets if !app.is_popped(DockTab::Assets) => assets_content(app, ui),
+                            DockTab::Script if !app.is_popped(DockTab::Script) => script_content(app, ui),
+                            DockTab::Console if !app.is_popped(DockTab::Console) => console_content(app, ui),
+                            DockTab::History if !app.is_popped(DockTab::History) => history_content(app, ui),
+                            _ => {}
                         });
                 },
             );
@@ -104,7 +113,7 @@ fn dock_tab_strip(app: &mut RoadkitApp, ui: &mut egui::Ui) {
     let t = tokens(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), TAB_STRIP_H), egui::Sense::hover());
     ui.painter().rect_filled(rect, 4.0, t.tab_strip);
-    let open = app.panels.open_tabs();
+    let open: Vec<DockTab> = app.panels.open_tabs().into_iter().filter(|t| !app.is_popped(*t)).collect();
     let mut x = rect.left() + 6.0;
     for tab in &open {
         let selected = *tab == app.dock_tab;
@@ -133,13 +142,21 @@ fn dock_tab_strip(app: &mut RoadkitApp, ui: &mut egui::Ui) {
         }
         x += label_w + 2.0;
     }
-    // collapse toggle at the right edge
+    // pop-out + collapse toggles at the right edge
+    let pbtn = egui::Rect::from_min_size(egui::pos2(rect.right() - 40.0, rect.top() + 8.0), egui::vec2(16.0, 16.0));
+    let pr = ui.interact(pbtn, egui::Id::new("dock_popout"), egui::Sense::click());
+    egui_kit::paint(ui, IconName::Box, pbtn.shrink(1.0), if pr.hovered() { t.text } else { t.text_dim });
+    if pr.clicked() {
+        app.pop_out(app.dock_tab);
+    }
+    pr.on_hover_text("Pop this panel out into a free-floating window (Terrazon detachable panels)");
     let cbtn = egui::Rect::from_min_size(egui::pos2(rect.right() - 22.0, rect.top() + 8.0), egui::vec2(16.0, 16.0));
     let cr = ui.interact(cbtn, egui::Id::new("dock_collapse"), egui::Sense::click());
     egui_kit::paint(ui, IconName::ChevronsRight, cbtn.shrink(1.0), if cr.hovered() { t.text } else { t.text_dim });
     if cr.clicked() {
         app.dock_collapsed = true;
     }
+    cr.on_hover_text("Collapse the dock to the icon column");
 }
 
 /* ================================================================== */
@@ -242,12 +259,22 @@ fn layers_content(app: &mut RoadkitApp, ui: &mut egui::Ui) {
             drop(sc);
         }
         if row.clicked() {
-            app.clear_selection();
-            app.sel_container = Some(ci);
-            app.dock_tab = DockTab::Properties;
+            // the chevron zone toggles the subtree; the rest of the row selects
+            let on_chevron = row
+                .interact_pointer_pos()
+                .map(|p| p.x < row.rect.left() + 22.0)
+                .unwrap_or(false);
+            if on_chevron {
+                if app.expanded.contains(name) {
+                    app.expanded.remove(name);
+                } else {
+                    app.expanded.insert(name.clone());
+                }
+            } else {
+                app.select_container(ci); // stays on the Layers tree — open Properties yourself
+            }
         }
-        // disclosure toggle on the chevron (click without selecting? — treat
-        // arrow key / alt-click; also expand when selected)
+        // right-click also toggles the disclosure (power-user shortcut)
         if row.secondary_clicked() {
             if app.expanded.contains(name) {
                 app.expanded.remove(name);
@@ -292,9 +319,7 @@ fn layers_content(app: &mut RoadkitApp, ui: &mut egui::Ui) {
                     drop(sc);
                 }
                 if prow.clicked() {
-                    app.clear_selection();
-                    app.sel = Some((ci, pi));
-                    app.dock_tab = DockTab::Properties;
+                    app.select_point(ci, pi); // no dock hijack — Properties stays where you left it
                 }
             }
             // "add point" hint row
@@ -321,7 +346,6 @@ fn layers_content(app: &mut RoadkitApp, ui: &mut egui::Ui) {
                         app.sel = Some((ci, 0));
                         app.sel_container = None;
                         app.add_point_at(last.0, last.1);
-                        app.dock_tab = DockTab::Properties;
                     }
                 });
             }
@@ -356,9 +380,7 @@ fn layers_content(app: &mut RoadkitApp, ui: &mut egui::Ui) {
                 },
             );
             if row.clicked() {
-                app.clear_selection();
-                app.sel_junction = Some(ji);
-                app.dock_tab = DockTab::Properties;
+                app.select_junction(ji); // selection only — no auto-Properties
             }
         }
     }
@@ -1715,6 +1737,58 @@ fn history_content(app: &mut RoadkitApp, ui: &mut egui::Ui) {
 /* Dialogs                                                             */
 /* ================================================================== */
 
+/* ------------------------------------------------------------------ */
+/* Floating panels — the dock tabs popped out as free-moving windows    */
+/* ------------------------------------------------------------------ */
+
+/// Every popped tab renders as a free-floating egui window (Terrazon
+/// detachable panels): drag anywhere, resize, and ✕ / "Dock back" returns
+/// it into the right dock. Content is the exact same panel body.
+pub fn floating_panels(app: &mut RoadkitApp, ctx: &egui::Context) {
+    let tabs = app.popped.clone();
+    for tab in tabs {
+        let mut open = true;
+        let mut win = egui::Window::new(RichText::new(tab.label()).strong().size(13.0))
+            .open(&mut open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(310.0)
+            .default_height(430.0)
+            .id(egui::Id::new(("popout", tab as u8)));
+        win.show(ctx, |ui| {
+            // header: dock-back control + hint
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("Dock back").size(11.0))
+                            .min_size(egui::vec2(86.0, 20.0)),
+                    )
+                    .on_hover_text("Return this panel into the right dock")
+                    .clicked()
+                {
+                    app.dock_back(tab);
+                }
+                ui.label(RichText::new("free panel — drag the title bar").size(10.0).color(tokens(ui.ctx()).text_dim));
+            });
+            ui.add_space(2.0);
+            egui::ScrollArea::vertical()
+                .id_source(("popout_body", tab as u8))
+                .auto_shrink([false, false])
+                .show(ui, |ui| match tab {
+                    DockTab::Layers => layers_content(app, ui),
+                    DockTab::Properties => properties_content(app, ui),
+                    DockTab::Assets => assets_content(app, ui),
+                    DockTab::Script => script_content(app, ui),
+                    DockTab::Console => console_content(app, ui),
+                    DockTab::History => history_content(app, ui),
+                });
+        });
+        if !open {
+            app.dock_back(tab); // ✕ = take it back into the dock
+        }
+    }
+}
+
 pub fn dialogs(app: &mut RoadkitApp, ctx: &egui::Context) {
     if app.show_api {
         let mut open = true;
@@ -1748,7 +1822,7 @@ pub fn dialogs(app: &mut RoadkitApp, ctx: &egui::Context) {
                 ui.label("Pure-Rust road studio in the spirit of godot-road-generator:");
                 ui.label("• roads are PROCEDURAL — RoadPoint magnitudes drive cubic Beziers, swept into textured lane/shoulder meshes");
                 ui.label("• 28 GLB assets — props, junction prefabs, TZ/US/EU traffic lights, road signs, BRT Mwendokasi median stations");
-                ui.label("• layer engine: RoadManager → RoadContainer → RoadPoint with eye/lock, synced to plan + properties");
+                ui.label("• layer engine: RoadManager > RoadContainer > RoadPoint with eye/lock, synced to plan + properties");
                 ui.label("• auto junctions: endpoint welds, n-gon crossings, T-junctions, roundabouts with islands, WFC prefab tiles");
                 ui.label("• a built-in .gd parser + interpreter runs Godot-style scripts that drive the whole scene");
                 ui.label("• dependency-free parallel software 3D renderer (z-buffered, lambert, perspective-correct textures)");
@@ -1758,6 +1832,65 @@ pub fn dialogs(app: &mut RoadkitApp, ctx: &egui::Context) {
             });
         if !open {
             app.show_about = false;
+        }
+    }
+    if app.show_nodes_help {
+        let mut open = true;
+        egui::Window::new("Road node structure — what is what")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
+                    let t = tokens(ui.ctx());
+                    ui.label(RichText::new("The road tree (godot-road-generator model, same as the Layers panel)").strong().size(13.5));
+                    ui.add_space(4.0);
+                    // mini tree
+                    let tree_row_ui = |ui: &mut egui::Ui, depth: usize, label: &str, dim: bool, icon: IconName| {
+                        egui_kit::tree_row(
+                            ui,
+                            depth,
+                            None,
+                            label,
+                            &egui_kit::TreeRowStyle { row_h: 24.0, dim, icon: Some(icon), ..Default::default() },
+                            |ui, _r| {
+                                let _ = ui;
+                            },
+                        );
+                    };
+                    tree_row_ui(ui, 0, "RoadManager — the scene root, owns ALL roads", false, IconName::Junction);
+                    tree_row_ui(ui, 1, "RoadContainer — ONE road (an ordered chain of points)", false, IconName::Road);
+                    tree_row_ui(ui, 2, "RoadPoint — one cross-section (pos · bearing · lanes · widths)", false, IconName::Point);
+                    tree_row_ui(ui, 2, "RoadPoint …", true, IconName::Point);
+                    tree_row_ui(ui, 1, "RoadLane — AI path along the container (per direction)", true, IconName::Sign);
+                    tree_row_ui(ui, 1, "RoadLaneAgent — a vehicle that follows a RoadLane", true, IconName::Bus);
+                    tree_row_ui(ui, 0, "RoadIntersection — auto node where 3+ roads meet", false, IconName::TrafficLight);
+                    ui.add_space(8.0);
+
+                    ui.label(RichText::new("RoadManager").strong().color(t.accent));
+                    ui.label("The MANAGER = the scene root. It is the whole roads database: it holds every RoadContainer, re-generates all geometry when anything changes, resolves warnings, and detects where roads meet. Select nothing in Layers — Properties then shows the RoadManager (scene) settings: junction engine, snap, terrain.");
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("RoadContainer").strong().color(t.accent));
+                    ui.label("The CONTAINER = ONE road. An ordered list of RoadPoints (P1 -> P2 -> P3 ...). It sweeps the cross-section between consecutive points to build the visible road mesh, aligns the vectors at every shared point (tangent / normal / eased widths, like godot-road-generator), and holds the junction presets (roundabout_2x2, 4way…). The colour bar in Layers = its layer colour; the eye hides the whole road.");
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("RoadPoint").strong().color(t.accent));
+                    ui.label("The POINT = one cross-section \"post\" planted in the world: position (x, z + elevation), travel bearing, prior/next handle magnitudes (cubic Bezier shaping), lanes (traffic_dir list, REVERSE first / FORWARD last), lane width, shoulders, gutters, median, pathways, alignment (Geometric / Divider), underside thickness. Edit it in Properties — or drag it in the 2D plan. Turn on \"points\" in the 3D toolbar to see every point; click one to select it and it shows the red X / green Y / blue Z axis lines.");
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("RoadLane / RoadLaneAgent").strong().color(t.accent));
+                    ui.label("A RoadLane is an AI path generated along a container (one per direction — the \"lanes\" overlay in 3D). A RoadLaneAgent drives along a RoadLane. The traffic sim spawns agents on all lanes.");
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("RoadIntersection").strong().color(t.accent));
+                    ui.label("Where 3+ containers meet (or two endpoints weld), the manager creates an intersection: legs, signal phases, stop lines, optional roundabout island + prefab tile. Visible in Layers under \"ROAD INTERSECTIONS\".");
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Where to click what").strong().size(12.5).color(t.text_strong));
+                    ui.label("• Layers tree: click a row to SELECT it (the tree stays put — open Properties yourself); click the chevron to fold/unfold; eye = visibility, lock = editing.");
+                    ui.label("• 3D viewport: \"points\" toggle shows a marker at every RoadPoint — click a marker to select that point (XYZ tripod appears).");
+                    ui.label("• Properties panel: the inspector for the current selection (point / container / junction / scene).");
+                    ui.label("• Any dock tab: the box button pops it out as a free window — move it anywhere, X or \"Dock back\" returns it.");
+                });
+            });
+        if !open {
+            app.show_nodes_help = false;
         }
     }
 }

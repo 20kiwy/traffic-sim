@@ -90,3 +90,31 @@ Build
   web-preview/ index.html loader, CI builds + deploys it to GitHub Pages
 - Verified: roadkit tests 7/7, egui-app selftest ALL PASS, reference renders
   regenerated (screenshots/v023*.png)
+
+## v0.2.4 (unreleased)
+
+- Terrazon-style editor chrome rework (verified interactively under Xvfb + xdotool):
+  - LEFT VERTICAL TOOL RAIL REMOVED — the four tools (Select V / Add A / Stamp P /
+    Pan H) moved into the top control bar as compact icon+hotkey chips; the whole
+    64 px column is gone and the viewport breathes
+  - LAYERS PANEL NO LONGER HIJACKS THE DOCK — clicking a RoadManager / RoadContainer /
+    RoadPoint / intersection row selects it and STAYS on Layers; you open Properties
+    yourself. The tree chevron folds/unfolds the subtree (click the arrow zone;
+    right-click still toggles), so selection and expansion are independent
+  - DETACHABLE PANELS (Terrazon parity) — every dock tab has a pop-out button
+    (box icon in the tab strip); the popped panel becomes a free-floating window
+    (drag anywhere, resize) with a "Dock back" button; the window X docks it back
+    too. Popped tabs leave the dock strip; the icon column shows them as active
+  - RIGHT DOCK DECLUTTERED — default tabs are now Layers + Properties only;
+    Assets/Script/Console/History live on the icon column until opened
+  - 3D RoadPoint MARKERS (Terrazon point gizmo) — "points" toggle in the 3D toolbar
+    draws a clickable marker at every visible RoadPoint (layer-coloured, fog-faded,
+    depth-sorted); hover shows name · container · world coords; CLICK selects that
+    RoadPoint (no dock switch) and the selection gets the red X / green Y / blue Z
+    world-axis tripod + a name/coords label — click a point, then open Properties
+    to edit its values (status bar says exactly that)
+  - Help > "Road node structure — what is what": explains RoadManager (manager),
+    RoadContainer (one road = chain of points), RoadPoint (one cross-section),
+    RoadLane/RoadLaneAgent (AI) and RoadIntersection, with the tree mirrored from
+    the Layers panel
+- New screenshots: screenshots/v03ui_panels.png, v03ui_point_xyz.png, v03ui_popout.png
