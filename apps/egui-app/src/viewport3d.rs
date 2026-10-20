@@ -4,6 +4,7 @@
 //! before the scene build (the layer engine's eye).
 
 use crate::state::{LightOffset, RoadkitApp, RenderState, Tool};
+use gdmath::Mat4;
 use egui::RichText;
 use gdmath::vec3::Vec3;
 use roads::model::RoadCurve;
@@ -94,10 +95,25 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 ui.toggle_value(&mut app.render.show_points, "points").on_hover_text("Show every RoadPoint as a clickable marker — click one to select it and see its red X / green Y / blue Z axis lines (Terrazon gizmo)");
                 ui.toggle_value(&mut app.render.spin, "spin").on_hover_text("Auto-orbit the camera");
                 if ui
+                    .toggle_value(&mut app.render.flow_on, "lane-sim")
+                    .on_hover_text("Lane-graph simulation (simflow): cars align per lane, take turn connectors, queue at red lights and yield at zebra crossings")
+                    .clicked()
+                {
+                    if app.render.flow_on && app.render.sim_on {
+                        app.render.sim_on = false;
+                        app.render.sim = None;
+                    }
+                    app.render.dirty = true;
+                }
+                if ui
                     .toggle_value(&mut app.render.sim_on, "traffic")
                     .on_hover_text("Simulate traffic — vehicle agents obey the junction signals")
                     .clicked()
                 {
+                    if app.render.sim_on && app.render.flow_on {
+                        app.render.flow_on = false;
+                        app.render.flow = None;
+                    }
                     if app.render.sim_on && app.render.sim.is_none() {
                         let sc = app.scene.borrow();
                         app.render.sim = Some(
@@ -115,6 +131,22 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     }
                     app.render.dirty = true;
                 }
+                // Blender-style viewport shading chips
+                for (mode, label) in [
+                    (roadkit::raster::ShadeMode::Solid, "solid"),
+                    (roadkit::raster::ShadeMode::Normals, "normals"),
+                    (roadkit::raster::ShadeMode::Wireframe, "wire"),
+                ] {
+                    let on = app.render.shading == mode;
+                    if ui
+                        .selectable_label(on, RichText::new(label).size(11.0))
+                        .on_hover_text(format!("Viewport shading: {label} (Blender-style modes)"))
+                        .clicked()
+                    {
+                        app.render.shading = mode;
+                        app.render.dirty = true;
+                    }
+                }
                 if app.render.sim_on {
                     ui.add(
                         egui::Slider::new(&mut app.render.sim_density, 4.0..=60.0)
@@ -126,7 +158,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     app.render.dirty = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("LMB orbit · wheel zoom · RMB pan · R reset").size(10.5).color(t.text_dim));
+                    ui.label(RichText::new("LMB orbit · wheel smooth-zoom · RMB pan · arrows/WASD pan · double-click zoom · R reset").size(10.5).color(t.text_dim));
                 });
             });
         });
@@ -156,8 +188,55 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
 
             // engine day environment: pale haze fog + zenith sky (yakui-app look)
             let env = roadkit::ENV_DAY;
-            // traffic sim: advance one frame step and render its vehicles
+            // traffic sim: advance one frame step and render its vehicles.
+            // Two engines: the classic per-intersection TrafficSim and the
+            // lane-graph simflow (FlowSim) — the toolbar toggles choose.
             let mut extra: Vec<roadkit::PropDraw> = Vec::new();
+            if app.render.flow_on {
+                let curves = {
+                    let sc = app.scene.borrow();
+                    sc.curves.clone()
+                };
+                if app.render.flow.is_none() {
+                    let junctions = {
+                        let sc = app.scene.borrow();
+                        sc.junctions.clone()
+                    };
+                    app.render.flow = Some(roadkit::flow::FlowSim::build(
+                        &curves,
+                        &junctions,
+                        &app.signals,
+                        simflow::SimSettings {
+                            vmax: 13.9,
+                            ..Default::default()
+                        },
+                        app.render.sim_left_hand,
+                    ));
+                }
+                if let Some(flow) = &mut app.render.flow {
+                    let poses = flow.step_poses(1.0 / 30.0, &curves);
+                    // map each class to its fleet GLB asset
+                    for p in poses {
+                        let asset = match p.class {
+                            simflow::VehicleClass::Car => "car_sedan",
+                            simflow::VehicleClass::Daladala => "daladala",
+                            simflow::VehicleClass::BrtBus => "brt_bus",
+                            simflow::VehicleClass::Truck => "truck",
+                            simflow::VehicleClass::Moto => "moto",
+                        };
+                        if let Some(idx) = app.assets.index.get(asset).copied() {
+                            let model = Mat4::prop_model(
+                                Vec3::new(p.x as f32, p.y as f32, p.z as f32),
+                                p.yaw as f32,
+                                1.0,
+                            );
+                            extra.push(roadkit::PropDraw { asset: idx, model, tex: -1 });
+                        }
+                    }
+                }
+            } else if app.render.flow.is_some() {
+                app.render.flow = None;
+            }
             if app.render.sim_on {
                 let curves = {
                     let sc = app.scene.borrow();
@@ -208,7 +287,18 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     // props hidden: render without prop draws (no scene clone)
                     &scene
                 };
-                rgba = roadkit::render_scene_props_env(target, &app.assets, &app.textures, &app.cam, w, h, env, &extra, app.render.show_props);
+                rgba = roadkit::render_scene_props_env_shaded(
+                    target,
+                    &app.assets,
+                    &app.textures,
+                    &app.cam,
+                    w,
+                    h,
+                    env,
+                    &extra,
+                    app.render.show_props,
+                    app.render.shading,
+                );
                 app.render.render_ms = t0.elapsed().as_secs_f32() * 1000.0;
                 if std::env::var("ROADKIT_DUMP_PNG").is_ok() {
                     let _ = std::fs::write("/tmp/app_render.raw", &rgba);
@@ -347,21 +437,75 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             if response.hovered() {
                 let scroll = ctx.input(|i| i.raw_scroll_delta.y);
                 if scroll != 0.0 {
-                    app.cam.dist = (app.cam.dist * (1.0 + scroll * 0.0012)).clamp(4.0, 60_000.0);
+                    // Google-Maps-style exponential zoom (smooth, cursor
+                    // anchored via the orbit target retention)
+                    app.cam.zoom_vel += scroll * 0.045;
+                }
+                // double-click zooms in one step toward the view center
+                if response.double_clicked() {
+                    app.cam.zoom_vel -= 260.0;
+                }
+                // arrow keys / WASD pan the target in the view plane
+                let (mut ax, mut ay) = (0.0f32, 0.0f32);
+                ctx.input(|i| {
+                    for key in [
+                        (egui::Key::ArrowLeft, -1.0, 0.0),
+                        (egui::Key::ArrowRight, 1.0, 0.0),
+                        (egui::Key::ArrowUp, 0.0, -1.0),
+                        (egui::Key::ArrowDown, 0.0, 1.0),
+                        (egui::Key::A, -1.0, 0.0),
+                        (egui::Key::D, 1.0, 0.0),
+                        (egui::Key::W, 0.0, -1.0),
+                        (egui::Key::S, 0.0, 1.0),
+                    ] {
+                        if i.key_down(key.0) {
+                            ax += key.1;
+                            ay += key.2;
+                        }
+                    }
+                });
+                if ax != 0.0 || ay != 0.0 {
+                    let view = app.cam.view();
+                    let right = Vec3::new(view.m[0], view.m[1], view.m[2]);
+                    let up = Vec3::new(view.m[4], view.m[5], view.m[6]);
+                    let k = app.cam.dist * 0.02;
+                    app.cam.target = app.cam.target
+                        + right * (ax * k)
+                        - up * (ay * k);
+                    app.render.dirty = true;
                 }
             }
 
+            // Google-Maps-style on-screen navigation cluster: compass ring
+            // (N/E/S/W pan arrows) + zoom +/- — drawn as pure overlay
+            draw_nav_cluster(app, ui, rect, &response);
+
             // ---- HUD ----
             let stats = scene.stats;
+            // Google-Maps-style coordinate + zoom readout (DSM anchor)
+            let geo = {
+                let (lon0, lat0) = roadkit::dsm::GEO_ANCHOR;
+                let lon = lon0 + app.cam.target.x as f64 / 110_573.0;
+                let lat = lat0 - app.cam.target.z as f64 / 110_574.0;
+                // google-style zoom level ~ log2 of ground resolution
+                let zoom = ((1132.0 / app.cam.dist.max(1.0)).log2() + 20.0).clamp(1.0, 21.0);
+                format!("{:.6}°, {:.6}° · z{:.1}", lon, lat, zoom)
+            };
             let hud = format!(
-                "{} curves · {} points · {} GLB props · {} tris · {:.0} m road · {:.1} ms/frame{}{}",
+                "{} curves · {} points · {} GLB props · {} tris · {:.0} m road · {:.1} ms/frame{}{}{} · {}",
                 stats.curves,
                 stats.points,
                 stats.props,
                 stats.tris,
                 stats.length_m,
                 app.render.render_ms,
-                if app.render.sim_on {
+                if app.render.flow_on {
+                    format!(
+                        " · simflow {}{}",
+                        app.render.flow.as_ref().map(|f| f.sim.vehicles.len()).unwrap_or(0),
+                        app.render.flow.as_ref().map(|f| format!(" · {} queued", f.queued())).unwrap_or_default(),
+                    )
+                } else if app.render.sim_on {
                     format!(
                         " · {} vehicles",
                         app.render.sim.as_ref().map(|s| s.vehicles.len()).unwrap_or(0)
@@ -370,6 +514,12 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     String::new()
                 },
                 if cache_hit { " · cached" } else { "" },
+                if app.render.shading != roadkit::raster::ShadeMode::Solid {
+                    format!(" · {:?}", app.render.shading)
+                } else {
+                    String::new()
+                },
+                geo,
             );
             ui.painter().text(
                 egui::Pos2::new(rect.left() + 10.0, rect.top() + 8.0),
@@ -416,6 +566,8 @@ fn frame_sig(app: &RoadkitApp, w: usize, h: usize, extra: usize) -> u64 {
     app.render.show_props.hash(&mut hsh);
     app.render.show_lanes.hash(&mut hsh);
     app.render.show_points.hash(&mut hsh);
+    app.render.shading.hash(&mut hsh);
+    app.render.flow_on.hash(&mut hsh);
     w.hash(&mut hsh);
     h.hash(&mut hsh);
     extra.hash(&mut hsh);
@@ -442,6 +594,53 @@ struct AxisEntry {
 /// the Godot viewport widget: +Y top, +X lower-right, +Z lower-left, dim
 /// negatives opposite. Clicking a circle snaps the orbit camera onto that
 /// axis (looking at the target); dragging anywhere on the widget orbits.
+/// Google-Maps-style on-screen navigation: compass pan arrows (N/E/S/W),
+/// recenter dot and zoom +/- chips, drawn top-right under the axis gizmo.
+fn draw_nav_cluster(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, _response: &egui::Response) {
+    let t = crate::theme::t(ui.ctx());
+    let cx = rect.right() - 46.0;
+    let cy = rect.top() + 150.0;
+    let painter = ui.painter_at(rect);
+    let btn = |p: egui::Pos2, label: &str| -> egui::Rect {
+        let r = egui::Rect::from_center_size(p, egui::Vec2::new(22.0, 20.0));
+        painter.rect_filled(r, 4.0, egui::Color32::from_rgba_unmultiplied(28, 30, 34, 215));
+        painter.rect_stroke(r, 4.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(120, 124, 132, 160)));
+        painter.text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_rgba_unmultiplied(230, 232, 238, 240),
+        );
+        r
+    };
+    let mut pan = |app: &mut RoadkitApp, dx: f32, dz: f32| {
+        // pan the orbit target along WORLD axes scaled by distance —
+        // north (-z) / south / east / west like the map arrows
+        let k = app.cam.dist * 0.30;
+        app.cam.target.x += (dx * k) as f32;
+        app.cam.target.z += (dz * k) as f32;
+        app.render.dirty = true;
+    };
+    let n = btn(egui::Pos2::new(cx, cy - 24.0), "↑");   // north
+    let s = btn(egui::Pos2::new(cx, cy + 24.0), "↓");   // south
+    let w = btn(egui::Pos2::new(cx - 24.0, cy), "←");   // west
+    let e = btn(egui::Pos2::new(cx + 24.0, cy), "→");   // east
+    let zi = btn(egui::Pos2::new(cx, cy + 52.0), "+");  // zoom in
+    let zo = btn(egui::Pos2::new(cx, cy + 76.0), "−");  // zoom out
+    if let Some(pos) = ui.input(|i| i.pointer.latest_pos()) {
+        if rect.contains(pos) {
+            if n.contains(pos) { pan(app, 0.0, -1.0); }
+            if s.contains(pos) { pan(app, 0.0, 1.0); }
+            if w.contains(pos) { pan(app, -1.0, 0.0); }
+            if e.contains(pos) { pan(app, 1.0, 0.0); }
+            if zi.contains(pos) { app.cam.zoom_vel -= 60.0; }
+            if zo.contains(pos) { app.cam.zoom_vel += 60.0; }
+        }
+    }
+    let _ = &mut pan;
+}
+
 fn draw_axis_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, response: &egui::Response, allow_click: bool) {
     const R: f32 = 40.0; // axis circle distance from the center
     const CR: f32 = 9.5; // circle radius (hit radius +2)

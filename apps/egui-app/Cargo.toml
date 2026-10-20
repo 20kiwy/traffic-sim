@@ -22,6 +22,7 @@ gdmath = { workspace = true }
 gdscript = { workspace = true }
 roads = { workspace = true }
 roadkit = { workspace = true }
+simflow = { workspace = true }
 egui-kit = { workspace = true }
 serde_json = { workspace = true }
 image = { workspace = true }

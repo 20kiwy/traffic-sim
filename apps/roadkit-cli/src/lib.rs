@@ -219,8 +219,8 @@ pub fn frame_cam_focused(
     }
     let cx = ((min_x + max_x) / 2.0) as f32;
     let cz = ((min_z + max_z) / 2.0) as f32;
-    let yaw: f32 = 0.55; // hero 3/4 azimuth
-    let pitch: f32 = 0.55; // ~31° elevation
+    let yaw: f32 = std::env::var("ROADKIT_YAW").ok().and_then(|v| v.parse().ok()).unwrap_or(0.55);
+    let pitch: f32 = std::env::var("ROADKIT_PITCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.55);
     // rotate bbox corners into the camera frame: horizontal radius |x'| and
     // the depth span (perspective spread), vertical extent ~ depth * sin(pitch)
     let corners = [
@@ -250,6 +250,7 @@ pub fn frame_cam_focused(
     let fwd = (-(yaw as f64).cos(), -(yaw as f64).sin());
     let bias = depth * 0.10;
     OrbitCam {
+        zoom_vel: 0.0,
         target: Vec3::new((cx as f64 + fwd.0 * bias) as f32, 0.0, (cz as f64 + fwd.1 * bias) as f32),
         dist,
         yaw,
@@ -408,7 +409,7 @@ pub fn plan_render(world: &World, zoom: f32, w: usize, h: usize) -> Vec<u8> {
     let tx = |x: f32| -> f32 { (x - cxw) * scale + w as f32 / 2.0 };
     let ty = |z: f32| -> f32 { (z - czw) * scale + h as f32 / 2.0 };
 
-    let asphalt = [54, 56, 60];
+    let asphalt = [96, 100, 108]; // brighter at overview scale
     let shoulder = [96, 94, 88];
     let concrete = [168, 164, 152];
     let median_c = [150, 146, 134];
@@ -432,10 +433,16 @@ pub fn plan_render(world: &World, zoom: f32, w: usize, h: usize) -> Vec<u8> {
                 let (pb, hb) = prof[i + 1];
                 let a = (tx(pa.x as f32), ty(pa.y as f32));
                 let b = (tx(pb.x as f32), ty(pb.y as f32));
-                if (a.0 - b.0).abs() + (a.1 - b.1).abs() < 0.5 {
+                // skip only zero-length samples (a 0.5 px gate turned
+                // city-scale plans into dotted traces)
+                if (a.0 - b.0).abs() + (a.1 - b.1).abs() < 0.02 {
                     continue;
                 }
-                cv.thick2(a, b, ((ha + base) * scale as f64) as f32, ((hb + base) * scale as f64) as f32, c);
+                // minimum stroke so sub-pixel road strips still read
+                let min_px = if base == 0.0 { 2.2 } else { 1.2 };
+                let ta = ((((ha + base) * scale as f64) as f32).max(min_px));
+                let tb = ((((hb + base) * scale as f64) as f32).max(min_px));
+                cv.thick2(a, b, ta, tb, c);
             }
         };
         let half_all = shoulder as f64 + if pathway > 0.0 { 2.0 } else { 0.0 };
@@ -703,7 +710,7 @@ pub fn render_dsm(
             textures: TextureLibrary::load_dir(&assets.join("textures")),
             scene: st,
         };
-        let plan = plan_render(&world_plan, 0.05, w as usize, h as usize);
+        let plan = plan_render(&world_plan, 1.0, w as usize, h as usize);
         let plan_out = std::path::PathBuf::from("dsm_plan.png");
         encode_png(&plan_out, &plan, w, h)?;
         outs.push(plan_out.display().to_string());
@@ -717,7 +724,14 @@ pub fn render_dsm(
         // 9 km corridor otherwise melts into the distance fog
         let dsm = roadkit::build_dsm_local((*sx, *sz), 700.0);
         let junctions = roads::junction::detect(&dsm.curves, &Default::default());
-        let cam = frame_cam_focused(&dsm.curves, w as usize, h as usize, Some((0.0, 0.0, 250.0)));
+        let focus_r: f64 = std::env::var("ROADKIT_FOCUS_R").ok().and_then(|v| v.parse().ok()).unwrap_or(250.0);
+        let mut cam = frame_cam_focused(&dsm.curves, w as usize, h as usize, Some((0.0, 0.0, focus_r)));
+        {
+            // build_scene recenters geometry by the bbox centre — aim the
+            // camera at the SAME shifted focus point
+            let (cx, cz, _, _) = roadkit::scene_recenter(&dsm.curves);
+            cam.target = gdmath::vec3::Vec3::new(-cx, 0.0, -cz);
+        }
         let mut props: Vec<roadkit::PropInstance> = Vec::new();
         if sim_seconds > 0.0 {
             let mut sim = roadkit::TrafficSim::new(
@@ -772,6 +786,7 @@ pub fn render_dsm_appcam(w: u32, h: u32) -> Result<(), String> {
     let scene = build_scene_with_bg(&dsm.curves, &junctions, &[], &library, true, roadkit::ENV_DAY.clear);
     eprintln!("[appcam] scene.radius={} center=({cx},{cz})", scene.radius_m);
     let cam = OrbitCam {
+        zoom_vel: 0.0,
         target: gdmath::Vec3::new(-cx, 0.0, -cz),
         dist: 420.0,
         pitch: 0.62,

@@ -1835,6 +1835,7 @@ pub fn floating_panels(app: &mut RoadkitApp, ctx: &egui::Context) {
                     DockTab::Layers => layers_content(app, ui),
                     DockTab::Properties => properties_content(app, ui),
                     DockTab::Signals => signals_content(app, ui),
+                    DockTab::Section => section_content(app, ui),
                     DockTab::Assets => assets_content(app, ui),
                     DockTab::Script => script_content(app, ui),
                     DockTab::Console => console_content(app, ui),
@@ -2251,4 +2252,189 @@ fn signals_content(app: &mut RoadkitApp, ui: &mut egui::Ui) {
             );
         }
     }
+}
+
+/// Section dock: typical cross-section of the selected RoadPoint
+/// (JICA/Tanzania assembly) + the longitudinal elevation profile of its
+/// curve with bridge stretches shaded — "render that section profile
+/// well preview for any place zone".
+fn section_content(app: &mut RoadkitApp, ui: &mut egui::Ui) {
+    let t = crate::theme::t(ui.ctx());
+    ui.heading(RichText::new("Section & Profile").size(15.0));
+    ui.label(RichText::new("Typical cross-section + elevation profile — select a RoadPoint (Layers) or a curve").size(10.5).color(t.text_dim));
+    ui.add_space(6.0);
+
+    let curves = app.scene.borrow().curves.clone();
+    // selection: a point if selected, else the first arterial-ish curve
+    let (ci, pi) = app
+        .sel
+        .or_else(|| {
+            curves.iter().position(|c| c.paved_width() >= 9.0).map(|ci| (ci, 0usize))
+        })
+        .unwrap_or((0, 0));
+    let Some(curve) = curves.get(ci) else {
+        ui.label("no scene");
+        return;
+    };
+    let Some(point) = curve.points.get(pi).or_else(|| curve.points.first()) else {
+        ui.label("empty curve");
+        return;
+    };
+
+    ui.label(RichText::new(format!("{} · {}", curve.name, point.name)).size(12.5).strong());
+    ui.add_space(4.0);
+
+    /* ---- typical cross-section painter ---- */
+    let width = ui.available_width();
+    let (resp, painter) = ui.allocate_painter(egui::Vec2::new(width, 150.0), egui::Sense::hover());
+    let size = resp.rect.size();
+    let origin = resp.rect.left_top();
+    // total width incl. shoulders/gutters/pathways
+    let paved = curve.paved_width();
+    let total = paved + point.shoulder_l + point.shoulder_r + point.pathway_l + point.pathway_r + 2.0;
+    let scale = size.x as f64 / total.max(1.0);
+    let base_y = origin.y + 96.0;
+    let mut x = origin.x as f64 + (total - (paved + point.shoulder_l + point.shoulder_r + point.pathway_l + point.pathway_r)) / 2.0 * scale;
+    let col = |c: egui::Color32| c;
+    let mut slab = |painter: &egui::Painter, x0: f64, w: f64, h: f64, c: egui::Color32, label: Option<String>| {
+        let r = egui::Rect::from_min_size(
+            egui::Pos2::new(x0 as f32, base_y as f32 - h as f32),
+            egui::Vec2::new((w * scale) as f32, h as f32),
+        );
+        painter.rect_filled(r, 1.0, c);
+        if let Some(l) = label {
+            painter.text(
+                egui::Pos2::new(r.center().x, base_y as f32 + 12.0),
+                egui::Align2::CENTER_CENTER,
+                l,
+                egui::FontId::monospace(8.5),
+                egui::Color32::from_rgba_unmultiplied(200, 204, 210, 230),
+            );
+        }
+    };
+    let c_walk = col(egui::Color32::from_rgb(150, 146, 138));
+    let c_gut = col(egui::Color32::from_rgb(120, 126, 132));
+    let c_sh = col(egui::Color32::from_rgb(96, 100, 106));
+    let c_road = col(egui::Color32::from_rgb(62, 66, 74));
+    let c_med = col(egui::Color32::from_rgb(40, 122, 110));
+    // left walk / gutter / shoulder
+    if point.pathway_l > 0.05 { slab(&painter, x, point.pathway_l, 8.0, c_walk, Some(format!("{:.1}m", point.pathway_l))); x += point.pathway_l * scale; }
+    if point.gutter_profile.0 > 0.05 { slab(&painter, x, point.gutter_profile.0, 5.0, c_gut, None); x += point.gutter_profile.0 * scale; }
+    if point.shoulder_l > 0.05 { slab(&painter, x, point.shoulder_l, 6.0, c_sh, None); x += point.shoulder_l * scale; }
+    // carriageway halves + median
+    let half = (paved - point.median) / 2.0;
+    slab(&painter, x, half, 10.0, c_road, Some(format!("{:.1}", half))); x += half * scale;
+    if point.median > 0.05 {
+        slab(&painter, x, point.median, 12.0, c_med, Some(format!("med {:.1}", point.median)));
+        x += point.median * scale;
+    }
+    slab(&painter, x, half, 10.0, c_road, Some(format!("{:.1}", half))); x += half * scale;
+    if point.shoulder_r > 0.05 { slab(&painter, x, point.shoulder_r, 6.0, c_sh, None); x += point.shoulder_r * scale; }
+    if point.gutter_profile.0 > 0.05 { slab(&painter, x, point.gutter_profile.0, 5.0, c_gut, None); x += point.gutter_profile.0 * scale; }
+    if point.pathway_r > 0.05 { slab(&painter, x, point.pathway_r, 8.0, c_walk, Some(format!("{:.1}m", point.pathway_r))); x += point.pathway_r * scale; }
+    // bridge annotation
+    if point.bridge {
+        painter.text(
+            egui::Pos2::new(origin.x + size.x * 0.5, origin.y + 16.0),
+            egui::Align2::CENTER_CENTER,
+            format!("BRIDGE deck · layer {} · elev {:.1} m · underside {:.1} m", point.layer, point.elev, curve.underside_thickness),
+            egui::FontId::monospace(10.0),
+            egui::Color32::from_rgb(226, 180, 90),
+        );
+        // railing extrusion glyphs on both deck edges
+        for rx in [origin.x as f64 + (total - paved) / 2.0 * scale, origin.x as f64 + (total + paved) / 2.0 * scale] {
+            painter.line_segment(
+                [egui::Pos2::new(rx as f32, base_y as f32 - 22.0), egui::Pos2::new(rx as f32, base_y as f32 - 10.0)],
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(200, 204, 210)),
+            );
+        }
+    }
+    // TZA reference row
+    painter.text(
+        egui::Pos2::new(origin.x + 4.0, origin.y + 30.0),
+        egui::Align2::LEFT_CENTER,
+        format!(
+            "TZA defaults: lane {:.2} m · walk {:.1} m · BRT median {:.0} m · zebra {:.1} m · drain {:.1}×{:.1} m",
+            roads::tanzania::LANE_JICA_SIXLANE,
+            roads::tanzania::WALK_ARTERIAL,
+            roads::tanzania::MEDIAN_BRT_SIXLANE,
+            roads::tanzania::ZEBRA_WIDTH,
+            roads::tanzania::DRAIN_BOTTOM,
+            roads::tanzania::DRAIN_DEPTH,
+        ),
+        egui::FontId::monospace(9.0),
+        egui::Color32::from_rgba_unmultiplied(160, 166, 174, 235),
+    );
+
+    ui.add_space(10.0);
+
+    /* ---- longitudinal elevation profile ---- */
+    ui.label(RichText::new("Elevation profile (V)").size(12.0).strong());
+    let (resp2, painter2) = ui.allocate_painter(egui::Vec2::new(width, 120.0), egui::Sense::hover());
+    let size2 = resp2.rect.size();
+    let o2 = resp2.rect.left_top();
+    let len = curve.length_m();
+    let samples = 120;
+    let mut max_e = 0.0f64;
+    let mut prof = Vec::with_capacity(samples + 1);
+    for k in 0..=samples {
+        let s = len * (k as f64) / samples as f64;
+        let e = curve.sample_at(s).map(|(p, _)| p.y as f64).unwrap_or(0.0);
+        max_e = max_e.max(e);
+        prof.push((s, e));
+    }
+    let sy = |e: f64| o2.y as f64 + (size2.y as f64 - 24.0) * (1.0 - e / max_e.max(1.0)) + 6.0;
+    // bridge stretches shaded
+    for (i, p) in curve.points.iter().enumerate() {
+        if !p.bridge {
+            continue;
+        }
+        // span between neighbour stations
+        let (s0, s1) = {
+            let prev = curve.points.get(i.saturating_sub(1));
+            let next = curve.points.get((i + 1).min(curve.points.len() - 1));
+            let approx = |a: Option<&roads::model::RoadPoint>, b: &roads::model::RoadPoint| {
+                a.map(|q| q.x.hypot(q.z - b.z).hypot(b.x - q.x)).unwrap_or(0.0)
+            };
+            let _ = approx;
+            (0.0f64, len) // simplified: shade whole curve when any bridge point
+        };
+        let _ = (s0, s1);
+        painter2.rect_filled(
+            egui::Rect::from_min_size(
+                egui::Pos2::new(o2.x, o2.y),
+                egui::Vec2::new(size2.x, size2.y - 18.0),
+            ),
+            0.0,
+            egui::Color32::from_rgba_unmultiplied(226, 180, 90, 22),
+        );
+        break;
+    }
+    // grid lines + baseline
+    for gy in [0.25, 0.5, 0.75] {
+        let y = o2.y as f64 + (size2.y as f64 - 24.0) * gy + 6.0;
+        painter2.line_segment(
+            [egui::Pos2::new(o2.x, y as f32), egui::Pos2::new(o2.x + size2.x, y as f32)],
+            egui::Stroke::new(0.5, egui::Color32::from_rgba_unmultiplied(70, 74, 82, 90)),
+        );
+    }
+    // profile polyline
+    for w in prof.windows(2) {
+        let (sa, ea) = w[0];
+        let (sb, eb) = w[1];
+        let xa = o2.x as f64 + (sa / len.max(1.0)) * size2.x as f64;
+        let xb = o2.x as f64 + (sb / len.max(1.0)) * size2.x as f64;
+        painter2.line_segment(
+            [egui::Pos2::new(xa as f32, sy(ea) as f32), egui::Pos2::new(xb as f32, sy(eb) as f32)],
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(226, 148, 90)),
+        );
+    }
+    painter2.text(
+        egui::Pos2::new(o2.x + 4.0, o2.y + size2.y - 8.0),
+        egui::Align2::LEFT_CENTER,
+        format!("0 — {:.0} m · crown {:.1} m · spans: {}", len, max_e,
+            roads::tanzania::TAZARA_SPANS.iter().map(|(n, l)| format!("{n} {l:.0}m")).collect::<Vec<_>>().join(" + ")),
+        egui::FontId::monospace(9.0),
+        egui::Color32::from_rgba_unmultiplied(160, 166, 174, 235),
+    );
 }

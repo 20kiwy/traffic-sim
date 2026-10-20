@@ -51,11 +51,15 @@ fn cli_run(args: &[String]) -> i32 {
         let ss: usize = arg_of(args, "--ss").and_then(|s| s.parse().ok()).unwrap_or(2).clamp(1, 4);
         let sim: f64 = arg_of(args, "--sim").and_then(|s| s.parse().ok()).unwrap_or(20.0);
         let density: f64 = arg_of(args, "--density").and_then(|s| s.parse().ok()).unwrap_or(14.0);
-        // Kijazi (0,0), Tazara (3261, 8647), Igesa (1680, -1592)
+        // Kijazi (0,0), Tazara (3261, 8647), Igesa (1680, -1592) + the
+        // Fig 5.5.1 priority sites (Gerezani BRT flyover, Mwenge, Selanda)
         let sites = [
             (0.0, 0.0, "kijazi"),
             (3261.0, 8647.0, "tazara"),
             (1680.0, -1592.0, "igesa"),
+            (4418.0, 6303.0, "gerezani"),
+            (2907.0, -1912.0, "mwenge"),
+            (8735.0, 8393.0, "selanda"),
         ];
         return match roadkit_cli::render_dsm(&sites, w, h, ss, sim, density) {
             Ok(files) => {

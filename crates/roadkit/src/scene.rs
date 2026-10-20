@@ -6,11 +6,50 @@
 //! Scene space = METERS, x east, y up, z south.
 
 use crate::library::AssetLibrary;
-use crate::raster::Frame;
+use crate::raster::{Frame, ShadeMode};
 use crate::textures::TextureLibrary;
 use gdmath::vec3::Vec3;
 use gdmath::Mat4;
 use roads::junction::{marking_parts_for, mesh_parts_for};
+
+/// The bbox-centre recentering `build_scene` applies (public so CLI/app
+/// cameras can aim at the SAME shifted coordinates — a focus point in
+/// curve space must become `focus - (cx, cz)` in scene space).
+pub fn scene_recenter_full(curves: &[RoadCurve]) -> (f32, f32, usize, f64, (f64, f64, f64, f64)) {
+    let (mut min_x, mut min_z) = (f64::INFINITY, f64::INFINITY);
+    let (mut max_x, mut max_z) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+    let mut total_points = 0usize;
+    let mut total_len = 0.0f64;
+    for c in curves {
+        total_points += c.points.len();
+        total_len += c.length_m();
+        for p in &c.points {
+            min_x = min_x.min(p.x);
+            min_z = min_z.min(p.z);
+            max_x = max_x.max(p.x);
+            max_z = max_z.max(p.z);
+        }
+        for p in &c.centerline(6.0) {
+            min_x = min_x.min(p.x as f64);
+            min_z = min_z.min(p.z as f64);
+            max_x = max_x.max(p.x as f64);
+            max_z = max_z.max(p.z as f64);
+        }
+    }
+    if !min_x.is_finite() {
+        (min_x, min_z, max_x, max_z) = (-50.0, -50.0, 50.0, 50.0);
+    }
+    let cx = ((min_x + max_x) / 2.0) as f32;
+    let cz = ((min_z + max_z) / 2.0) as f32;
+    (cx, cz, total_points, total_len, (min_x, min_z, max_x, max_z))
+}
+
+/// Compact form used by cameras (centre + stats only).
+pub fn scene_recenter(curves: &[RoadCurve]) -> (f32, f32, usize, f64) {
+    let (cx, cz, tp, tl, _) = scene_recenter_full(curves);
+    (cx, cz, tp, tl)
+}
+
 use roads::mesh3d::{build_parts, MeshQuality};
 use roads::model::RoadCurve;
 
@@ -157,29 +196,7 @@ pub fn build_scene_full_with_bg(
     // bbox of all curve points
     let (mut min_x, mut min_z) = (f64::INFINITY, f64::INFINITY);
     let (mut max_x, mut max_z) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-    let mut total_points = 0usize;
-    let mut total_len = 0.0f64;
-    for c in curves {
-        total_points += c.points.len();
-        total_len += c.length_m();
-        for p in &c.points {
-            min_x = min_x.min(p.x);
-            min_z = min_z.min(p.z);
-            max_x = max_x.max(p.x);
-            max_z = max_z.max(p.z);
-        }
-        for p in &c.centerline(6.0) {
-            min_x = min_x.min(p.x as f64);
-            min_z = min_z.min(p.z as f64);
-            max_x = max_x.max(p.x as f64);
-            max_z = max_z.max(p.z as f64);
-        }
-    }
-    if !min_x.is_finite() {
-        (min_x, min_z, max_x, max_z) = (-50.0, -50.0, 50.0, 50.0);
-    }
-    let cx = ((min_x + max_x) / 2.0) as f32;
-    let cz = ((min_z + max_z) / 2.0) as f32;
+    let (cx, cz, total_points, total_len, (min_x, min_z, max_x, max_z)) = scene_recenter_full(curves);
 
     // road meshes (textured)
     let mut parts: Vec<ScenePart> = Vec::new();
@@ -824,6 +841,22 @@ pub fn render_scene(
     bg: [u8; 4],
     extra: &[PropDraw],
 ) -> Vec<u8> {
+    render_scene_shaded(scene, library, textures, cam, w, h, bg, extra, ShadeMode::Solid)
+}
+
+/// `render_scene` with a Blender-style viewport shading mode.
+#[allow(clippy::too_many_arguments)]
+pub fn render_scene_shaded(
+    scene: &Scene,
+    library: &AssetLibrary,
+    textures: &TextureLibrary,
+    cam: &gdmath::OrbitCam,
+    w: usize,
+    h: usize,
+    bg: [u8; 4],
+    extra: &[PropDraw],
+    shade: ShadeMode,
+) -> Vec<u8> {
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -831,6 +864,7 @@ pub fn render_scene(
         .min(h / 120.max(1));
     if threads <= 1 {
         let mut frame = Frame::new(w, h, bg);
+        frame.shade = shade;
         draw_all(
             &mut frame, scene, library, textures, cam, bg, extra,
         );
@@ -850,6 +884,7 @@ pub fn render_scene(
             .map(|&(yb, bh)| {
                 s.spawn(move || {
                     let mut frame = Frame::band(w, bh, bg, yb, h);
+                    frame.shade = shade;
                     draw_all(&mut frame, scene, library, textures, cam, bg, extra);
                     frame
                 })
@@ -908,7 +943,23 @@ pub fn render_scene_env(
     env: Env,
     extra: &[PropDraw],
 ) -> Vec<u8> {
-    let mut rgba = render_scene(scene, library, textures, cam, w, h, env.clear, extra);
+    render_scene_env_shaded(scene, library, textures, cam, w, h, env, extra, ShadeMode::Solid)
+}
+
+/// `render_scene_env` with a viewport shading mode.
+#[allow(clippy::too_many_arguments)]
+pub fn render_scene_env_shaded(
+    scene: &Scene,
+    library: &AssetLibrary,
+    textures: &TextureLibrary,
+    cam: &gdmath::OrbitCam,
+    w: usize,
+    h: usize,
+    env: Env,
+    extra: &[PropDraw],
+    shade: ShadeMode,
+) -> Vec<u8> {
+    let mut rgba = render_scene_shaded(scene, library, textures, cam, w, h, env.clear, extra, shade);
     paint_sky(&mut rgba, w, h, cam.pitch, env);
     rgba
 }
@@ -926,8 +977,25 @@ pub fn render_scene_props_env(
     extra: &[PropDraw],
     show_props: bool,
 ) -> Vec<u8> {
+    render_scene_props_env_shaded(scene, library, textures, cam, w, h, env, extra, show_props, ShadeMode::Solid)
+}
+
+/// `render_scene_props_env` with a viewport shading mode.
+#[allow(clippy::too_many_arguments)]
+pub fn render_scene_props_env_shaded(
+    scene: &Scene,
+    library: &AssetLibrary,
+    textures: &TextureLibrary,
+    cam: &gdmath::OrbitCam,
+    w: usize,
+    h: usize,
+    env: Env,
+    extra: &[PropDraw],
+    show_props: bool,
+    shade: ShadeMode,
+) -> Vec<u8> {
     if show_props {
-        render_scene_env(scene, library, textures, cam, w, h, env, extra)
+        render_scene_env_shaded(scene, library, textures, cam, w, h, env, extra, shade)
     } else {
         let empty: Vec<PropDraw> = Vec::new();
         let mut bare = scene.clone();

@@ -60,6 +60,7 @@ pub enum DockTab {
     Layers,
     Properties,
     Signals,
+    Section,
     Assets,
     Script,
     Console,
@@ -67,10 +68,11 @@ pub enum DockTab {
 }
 
 impl DockTab {
-    pub const ALL: [DockTab; 7] = [
+    pub const ALL: [DockTab; 8] = [
         DockTab::Layers,
         DockTab::Properties,
         DockTab::Signals,
+        DockTab::Section,
         DockTab::Assets,
         DockTab::Script,
         DockTab::Console,
@@ -81,6 +83,7 @@ impl DockTab {
             DockTab::Layers => "Layers",
             DockTab::Properties => "Properties",
             DockTab::Signals => "Signals",
+            DockTab::Section => "Section",
             DockTab::Assets => "Assets",
             DockTab::Script => "Script",
             DockTab::Console => "Console",
@@ -94,6 +97,7 @@ impl DockTab {
             // traffic light dot glyph — the kit's beacon/lamp icon if present,
             // else the console glyph reads as a head
             DockTab::Signals => egui_kit::IconName::Console,
+            DockTab::Section => egui_kit::IconName::Sliders,
             DockTab::Assets => egui_kit::IconName::Box,
             DockTab::Script => egui_kit::IconName::Script,
             DockTab::Console => egui_kit::IconName::Console,
@@ -107,6 +111,7 @@ impl DockTab {
             DockTab::Layers => "Layer",
             DockTab::Properties => "Props",
             DockTab::Signals => "Signal",
+            DockTab::Section => "Sect",
             DockTab::Assets => "Asset",
             DockTab::Script => "Code",
             DockTab::Console => "Log",
@@ -121,6 +126,7 @@ pub struct Panels {
     pub layers: bool,
     pub properties: bool,
     pub signals: bool,
+    pub section: bool,
     pub assets: bool,
     pub script: bool,
     pub console: bool,
@@ -131,7 +137,7 @@ impl Default for Panels {
     fn default() -> Self {
         // Terrazon parity: only Layers + Properties docked; Assets/Script/
         // Console/History live on the icon column until wanted.
-        Self { layers: true, properties: true, signals: false, assets: false, script: false, console: false, history: false }
+        Self { layers: true, properties: true, signals: false, section: false, assets: false, script: false, console: false, history: false }
     }
 }
 
@@ -143,6 +149,7 @@ impl Panels {
             DockTab::Layers => self.layers,
             DockTab::Properties => self.properties,
             DockTab::Signals => self.signals,
+            DockTab::Section => self.section,
             DockTab::Assets => self.assets,
             DockTab::Script => self.script,
             DockTab::Console => self.console,
@@ -154,6 +161,7 @@ impl Panels {
             DockTab::Layers => self.layers = on,
             DockTab::Properties => self.properties = on,
             DockTab::Signals => self.signals = on,
+            DockTab::Section => self.section = on,
             DockTab::Assets => self.assets = on,
             DockTab::Script => self.script = on,
             DockTab::Console => self.console = on,
@@ -179,6 +187,12 @@ pub struct RenderState {
     /// per-intersection traffic simulation (vehicle agents + signals)
     pub sim: Option<roadkit::TrafficSim>,
     pub sim_on: bool,
+    /// lane-graph simulation (simflow): per-lane alignment, turn
+    /// connectors, red-light queues, zebra yields
+    pub flow: Option<roadkit::flow::FlowSim>,
+    pub flow_on: bool,
+    /// Blender-style viewport shading (solid / normals / wireframe)
+    pub shading: roadkit::raster::ShadeMode,
     pub sim_density: f64,
     /// left-hand traffic (Tanzania) — set when the DSM scenario loads
     pub sim_left_hand: bool,
@@ -205,6 +219,9 @@ impl Default for RenderState {
             show_points: true,
             sim: None,
             sim_on: false,
+            flow: None,
+            flow_on: false,
+            shading: roadkit::raster::ShadeMode::Solid,
             sim_density: 14.0,
             sim_left_hand: false,
             render_ms: 0.0,
@@ -1657,6 +1674,15 @@ impl eframe::App for RoadkitApp {
             self.fps = if self.fps <= 0.0 { 1.0 / dt } else { self.fps * 0.9 + (1.0 / dt) * 0.1 };
         }
         self.last_t = now;
+
+        // smooth zoom (Google-Maps feel): consume + decay the wheel velocity
+        if self.cam.zoom_vel.abs() > 0.01 {
+            let k = (self.cam.zoom_vel * 0.16).clamp(-self.cam.dist * 0.28, self.cam.dist * 0.28);
+            self.cam.dist = (self.cam.dist + k).clamp(4.0, 60_000.0);
+            self.cam.zoom_vel *= 0.82;
+            self.render.dirty = true;
+            ctx.request_repaint();
+        }
 
         // global shortcuts
         if ctx.input(|i| i.key_pressed(egui::Key::F5)) {

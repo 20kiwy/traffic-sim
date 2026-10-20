@@ -976,6 +976,7 @@ dependencies = [
  "roadkit",
  "roads",
  "serde_json",
+ "simflow",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time 1.1.0",

@@ -46,6 +46,8 @@ const SINZA_OSM: &str = include_str!("../assets/dsm/sinza.json");
 /* ------------- site anchors (lon/lat) ------------- */
 
 /// Scene origin = Kijazi interchange center (Morogoro × Sam Nujoma).
+/// Public: the app's HUD converts scene metres to lat/lon with this.
+pub const GEO_ANCHOR: (f64, f64) = (39.2220, -6.7720);
 const LON0: f64 = 39.2220;
 const LAT0: f64 = -6.7720;
 /// 111 320 m/deg · cos(6.81°) — metre-per-degree-longitude at DSM
@@ -269,6 +271,13 @@ pub fn build_dsm() -> DsmScene {
         ("Bandari Port junction".into(), BANDARI_PORT.0, BANDARI_PORT.1),
         ("Selanda Bridge (Mandela × Kilwa)".into(), SELANDA.0, SELANDA.1),
     ];
+
+    // orient every auto_bearing point (the builders set the flag but the
+    // GRG-style re-orientation normally runs from the script bridge only —
+    // without this the N-S carriageways keep bearing 0 and BOW east)
+    for c in &mut curves {
+        c.auto_orient();
+    }
 
     DsmScene { curves, registry, pois }
 }
@@ -669,7 +678,22 @@ fn corridor_dual(
     if pts.len() < 2 {
         return;
     }
-    // per-vertex left normal from the local chord
+    // subdivide first (see below), then per-vertex left normal from the
+    // local chord of the DENSE polyline
+    let mut dense0: Vec<(f64, f64, Option<&str>, Option<&str>)> = Vec::new();
+    for (i, v) in pts.iter().enumerate() {
+        if i > 0 {
+            let pv = pts[i - 1];
+            let d = (v.0 - pv.0).hypot(v.1 - pv.1);
+            let n = (d / 420.0).ceil() as usize;
+            for k in 1..n {
+                let t = k as f64 / n as f64;
+                dense0.push((pv.0 + (v.0 - pv.0) * t, pv.1 + (v.1 - pv.1) * t, None, None));
+            }
+        }
+        dense0.push(*v);
+    }
+    let pts: &[(f64, f64, Option<&str>, Option<&str>)] = &dense0;
     let mut lefts: Vec<(f64, f64)> = Vec::new();
     for i in 0..pts.len() {
         let (px, pz) = if i == 0 {
@@ -1024,18 +1048,78 @@ pub fn preset_by_name(name: &str) -> Option<SignalPlan> {
 pub fn build_dsm_local(site: (f64, f64), reach_m: f64) -> DsmScene {
     let full = build_dsm();
     let (sx, sz) = site;
+    let cut = reach_m + 120.0;
     let mut curves: Vec<RoadCurve> = Vec::new();
     for c in full.curves {
-        let near = c.points.iter().any(|p| (p.x - sx).hypot(p.z - sz) <= reach_m);
-        if !near {
-            continue;
+        // clip long corridors at the reach circle: keep inside points and
+        // interpolate entry/exit crossings so km-long arterial corridors
+        // contribute clean fragments around the site (the corridors are
+        // subdivided into <=420 m chunks by corridor_dual, so fragments
+        // always carry several points)
+        let (name_c, color_c, thick_c) = (c.name.clone(), c.color, c.underside_thickness);
+        let dist = |p: &roads::model::RoadPoint| (p.x - sx).hypot(p.z - sz);
+        let mut frag: Vec<roads::model::RoadPoint> = Vec::new();
+        {
+            let mut flush = |frag: &mut Vec<roads::model::RoadPoint>, curves: &mut Vec<RoadCurve>| {
+                if frag.len() >= 2 {
+                    let mut nc = RoadCurve::new(name_c.clone());
+                    nc.color = color_c;
+                    nc.underside_thickness = thick_c;
+                    for p in frag.drain(..) {
+                        nc.add_point(p);
+                    }
+                    curves.push(nc);
+                } else {
+                    frag.clear();
+                }
+            };
+            for (i, p) in c.points.iter().enumerate() {
+                if dist(p) <= cut {
+                    if i > 0 {
+                        if let Some(prev) = c.points.get(i - 1) {
+                            if dist(prev) > cut {
+                                let (d0, d1) = (dist(prev), dist(p));
+                                let t = ((d0 - cut) / (d0 - d1).max(1e-6)).clamp(0.0, 1.0);
+                                let mut q = RoadPoint::new(
+                                    prev.x + (p.x - prev.x) * t - sx,
+                                    prev.z + (p.z - prev.z) * t - sz,
+                                );
+                                q.auto_bearing = true;
+                                q.lanes = p.lanes.max(1);
+                                q.rev_lanes = p.rev_lanes;
+                                q.oneway = p.oneway;
+                                q.lane_width = p.lane_width;
+                                q.terminated = true;
+                                frag.push(q);
+                            }
+                        }
+                    }
+                    let mut q = p.clone();
+                    q.x -= sx;
+                    q.z -= sz;
+                    frag.push(q);
+                } else if let Some(last) = frag.last().map(|f| (f.x + sx, f.z + sz)) {
+                    let d0 = (last.0 - sx).hypot(last.1 - sz);
+                    let d1 = dist(p);
+                    let t = ((cut - d0) / (d1 - d0).max(1e-6)).clamp(0.0, 1.0);
+                    let mut q = RoadPoint::new(
+                        last.0 + (p.x - last.0) * t - sx,
+                        last.1 + (p.z - last.1) * t - sz,
+                    );
+                    q.auto_bearing = true;
+                    q.lanes = p.lanes.max(1);
+                    q.rev_lanes = p.rev_lanes;
+                    q.oneway = p.oneway;
+                    q.lane_width = p.lane_width;
+                    q.terminated = true;
+                    frag.push(q);
+                    flush(&mut frag, &mut curves);
+                } else {
+                    flush(&mut frag, &mut curves);
+                }
+            }
+            flush(&mut frag, &mut curves);
         }
-        let mut c = c;
-        for p in &mut c.points {
-            p.x -= sx;
-            p.z -= sz;
-        }
-        curves.push(c);
     }
     let mut registry = full.registry;
     registry.entries.retain(|e| (e.x - sx).hypot(e.z - sz) <= reach_m);

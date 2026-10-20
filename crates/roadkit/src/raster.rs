@@ -1,9 +1,24 @@
 //! Tiny CPU software rasterizer (z-buffered, flat-shaded, vertex colors).
 //! Renders the 3D road scene + GLB props to RGBA pixels that the egui UI
 //! uploads as a texture. No GPU dependency — works everywhere eframe runs.
+//!
+//! R10 adds Blender-style viewport shading: Solid (default), Normals
+//! (world-normal RGB) and Wireframe (hidden-line: dark depth fill +
+//! bright edges) — see `ShadeMode`.
 
 use gdmath::mat4::Mat4;
 use gdmath::vec3::Vec3;
+
+/// Viewport shading modes (Blender solid / normal / wireframe).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ShadeMode {
+    #[default]
+    Solid,
+    /// RGB = world normal × 0.5 + 0.5 (no texture)
+    Normals,
+    /// hidden-line wireframe (depth fill + bright edges)
+    Wireframe,
+}
 
 pub struct Frame {
     pub w: usize,
@@ -17,6 +32,8 @@ pub struct Frame {
     pub fog_end: f32,
     pub fog_color: [f32; 3],
     pub fog_on: bool,
+    /// active shading mode (Blender-style viewport modes)
+    pub shade: ShadeMode,
     /// parallel rendering: this frame covers the horizontal band of the FULL
     /// image starting at `y_base`; projection maps into FULL-image pixels then
     /// shifts by `-y_base` so local pixel (0,0) is full-image (0, y_base).
@@ -44,6 +61,7 @@ impl Frame {
                 bg[2] as f32 / 255.0,
             ],
             fog_on: false,
+            shade: ShadeMode::Solid,
             y_base,
             full_h,
         };
@@ -156,15 +174,89 @@ impl Frame {
                 n = n * -1.0;
             }
             let lam = n.dot(light).max(0.0);
-            let shade = 0.38 + 0.62 * lam;
+            let mut shade = 0.38 + 0.62 * lam;
+
+            // Blender-style viewport shading overrides
+            let mut local_tex = tex;
+            match self.shade {
+                ShadeMode::Normals => {
+                    let nc = [
+                        (n.x * 0.5 + 0.5).clamp(0.0, 1.0),
+                        (n.y * 0.5 + 0.5).clamp(0.0, 1.0),
+                        (n.z * 0.5 + 0.5).clamp(0.0, 1.0),
+                        1.0,
+                    ];
+                    for s in scr.iter_mut() {
+                        s.4 = nc;
+                    }
+                    shade = 1.0;
+                    local_tex = None;
+                }
+                ShadeMode::Wireframe => {
+                    // dark depth-writing fill (hidden-line) — edges after
+                    for s in scr.iter_mut() {
+                        s.4 = [0.16, 0.16, 0.19, 1.0];
+                    }
+                    shade = 1.0;
+                    local_tex = None;
+                }
+                ShadeMode::Solid => {}
+            }
 
             // fan triangulate the clipped polygon
             for k in 1..scr.len() - 1 {
                 let p0 = scr[0];
                 let p1 = scr[k];
                 let p2 = scr[k + 1];
-                raster_tri(self, p0, p1, p2, shade, tex);
+                raster_tri(self, p0, p1, p2, shade, local_tex);
             }
+
+            // wireframe edges on top of the depth fill
+            if self.shade == ShadeMode::Wireframe {
+                let pts: Vec<(f32, f32, f32)> =
+                    scr.iter().map(|s| (s.0, s.1, s.2)).collect();
+                let edge = [0.62, 0.78, 0.95, 1.0];
+                for w in pts.windows(2) {
+                    raster_line(self, w[0], w[1], edge);
+                }
+                if pts.len() > 2 {
+                    raster_line(self, *pts.last().unwrap(), pts[0], edge);
+                }
+            }
+        }
+    }
+
+    /// DDA line with depth test/write (wireframe edges).
+    pub fn draw_line_px(&mut self, x0: f32, y0: f32, z0: f32, x1: f32, y1: f32, z1: f32, c: [f32; 4]) {
+        raster_line(self, (x0, y0, z0), (x1, y1, z1), c);
+    }
+}
+
+fn raster_line(f: &mut Frame, a: (f32, f32, f32), b: (f32, f32, f32), c: [f32; 4]) {
+    let (x0, y0, z0) = a;
+    let (x1, y1, z1) = b;
+    let steps = ((x1 - x0).abs().max((y1 - y0).abs()).ceil() as usize).max(1);
+    for k in 0..=steps {
+        let t = k as f32 / steps as f32;
+        let x = x0 + (x1 - x0) * t;
+        let y = y0 + (y1 - y0) * t;
+        let z = z0 + (z1 - z0) * t;
+        let xi = x as isize;
+        let yi = y as isize + f.y_base as isize;
+        if xi < 0 || yi < 0 || xi >= f.w as isize || yi >= f.full_h as isize {
+            continue;
+        }
+        let idx = (yi as usize) * f.w + xi as usize;
+        if idx >= f.depth.len() {
+            continue;
+        }
+        if z >= f.depth[idx] {
+            f.depth[idx] = z;
+            let o = idx * 4;
+            f.color[o] = (c[0] * 255.0) as u8;
+            f.color[o + 1] = (c[1] * 255.0) as u8;
+            f.color[o + 2] = (c[2] * 255.0) as u8;
+            f.color[o + 3] = 255;
         }
     }
 }

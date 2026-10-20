@@ -123,6 +123,7 @@ pub struct CameraShot {
 impl CameraShot {
     pub fn to_cam(&self) -> OrbitCam {
         OrbitCam {
+            zoom_vel: 0.0,
             target: Vec3::new(self.target[0] as f32, self.target[1] as f32, self.target[2] as f32),
             dist: self.dist as f32,
             yaw: self.yaw as f32,

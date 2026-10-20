@@ -122,6 +122,9 @@ pub struct OrbitCam {
     pub yaw: f32,
     /// radians above the horizon
     pub pitch: f32,
+    /// pending smooth-zoom velocity (Google-Maps wheel feel; consumed
+    /// and decayed by the app's update loop)
+    pub zoom_vel: f32,
 }
 
 impl Default for OrbitCam {
@@ -131,6 +134,7 @@ impl Default for OrbitCam {
             dist: 160.0,
             yaw: 0.65,
             pitch: 0.5,
+            zoom_vel: 0.0,
         }
     }
 }
