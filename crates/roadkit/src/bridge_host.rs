@@ -295,6 +295,7 @@ fn point_from_obj(o: &dyn GodotObject) -> Result<RoadPoint, String> {
             Alignment::Geometric
         },
         underside_thickness: get_f(o, "underside_thickness", -1.0),
+        ..Default::default()
     })
 }
 

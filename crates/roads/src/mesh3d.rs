@@ -617,6 +617,7 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
     /* ---- 1+2. flatten + per-sample lerped profile (see `Sweep`) ------- */
     let sw = sweep_profile(curve, &q);
     let mut parts: Vec<MeshPart> = gutter_underside_parts(&sw); // before pathways
+    parts.extend(pier_parts(curve)); // flyover supports (JICA grade separation)
     let Sweep {
         pts,
         cum,
@@ -993,5 +994,94 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
         }
     }
 
+    parts
+}
+
+/* ---- flyover piers ------------------------------------------------- */
+
+/// Concrete piers under elevated (bridge / flyover) stretches — JICA
+/// §5.3.5 grade separation: a deck on 4 % approaches needs visible
+/// supports. Emits a box column every ~26 m of arc wherever the road
+/// surface sits > 2.5 m above the ground plane (COL_PLAIN trim column).
+pub fn pier_parts(curve: &RoadCurve) -> Vec<MeshPart> {
+    let mut parts = Vec::new();
+    if !curve.has_elevated() {
+        return parts;
+    }
+    let pts = curve.centerline(6.0);
+    if pts.len() < 2 {
+        return parts;
+    }
+    let pier_half_w = (curve.paved_width() * 0.22).clamp(0.8, 2.6);
+    const PIER_DEPTH: f64 = 2.2;
+    const SPACING: f64 = 26.0;
+    let mut since_last = SPACING; // force a pier at the first elevated sample
+    for i in 0..pts.len() - 1 {
+        let a = pts[i];
+        let b = pts[i + 1];
+        let seg = ((b.x - a.x) as f64).hypot((b.z - a.z) as f64).max(1e-6);
+        since_last += seg;
+        let deck_y = a.y as f64;
+        if deck_y <= 2.5 || since_last < SPACING {
+            continue;
+        }
+        since_last = 0.0;
+        // pier top just under the deck underside
+        let top = deck_y - 0.35;
+        if top < 1.0 {
+            continue;
+        }
+        // perpendicular of the centerline direction
+        let dx = (b.x - a.x) as f64 / seg;
+        let dz = (b.z - a.z) as f64 / seg;
+        let (px, pz) = (-dz, dx);
+        let (cx, cz) = (a.x as f64, a.z as f64);
+        let u0 = (COL_PLAIN as f64 * UV_COL) as f32;
+        let u1 = ((COL_PLAIN + 1) as f64 * UV_COL) as f32;
+        let mut part = MeshPart::new(CONCRETE_TINT);
+        part.tex = TEX_CEMENT;
+        // 4 corners of the box footprint
+        let corners = [
+            (cx + px * pier_half_w + 0.0, cz + pz * pier_half_w),
+            (cx - px * pier_half_w + 0.0, cz - pz * pier_half_w),
+        ];
+        // build the 4 side quads: two faces across the width, two across depth
+        let faces = [
+            // across-width faces (offset ± depth/2 along the road dir)
+            (
+                (cx + px * pier_half_w - dx * PIER_DEPTH / 2.0, cz + pz * pier_half_w - dz * PIER_DEPTH / 2.0),
+                (cx + px * pier_half_w + dx * PIER_DEPTH / 2.0, cz + pz * pier_half_w + dz * PIER_DEPTH / 2.0),
+            ),
+            (
+                (cx - px * pier_half_w - dx * PIER_DEPTH / 2.0, cz - pz * pier_half_w - dz * PIER_DEPTH / 2.0),
+                (cx - px * pier_half_w + dx * PIER_DEPTH / 2.0, cz - pz * pier_half_w + dz * PIER_DEPTH / 2.0),
+            ),
+            // across-depth faces
+            (
+                (cx + px * pier_half_w - dx * PIER_DEPTH / 2.0, cz + pz * pier_half_w - dz * PIER_DEPTH / 2.0),
+                (cx - px * pier_half_w - dx * PIER_DEPTH / 2.0, cz - pz * pier_half_w - dz * PIER_DEPTH / 2.0),
+            ),
+            (
+                (cx + px * pier_half_w + dx * PIER_DEPTH / 2.0, cz + pz * pier_half_w + dz * PIER_DEPTH / 2.0),
+                (cx - px * pier_half_w + dx * PIER_DEPTH / 2.0, cz - pz * pier_half_w + dz * PIER_DEPTH / 2.0),
+            ),
+        ];
+        for ((x0, z0), (x1, z1)) in faces {
+            let base = part.positions.len() as u32;
+            part.positions.push(Vec3::new(x0 as f32, 0.0, z0 as f32));
+            part.positions.push(Vec3::new(x1 as f32, 0.0, z1 as f32));
+            part.positions.push(Vec3::new(x1 as f32, top as f32, z1 as f32));
+            part.positions.push(Vec3::new(x0 as f32, top as f32, z0 as f32));
+            part.uv.push([u0, 0.0]);
+            part.uv.push([u1, 0.0]);
+            part.uv.push([u1, (top / 3.0) as f32]);
+            part.uv.push([u0, (top / 3.0) as f32]);
+            for idx in [0u32, 1, 2, 0, 2, 3] {
+                part.indices.push(base + idx);
+            }
+        }
+        let _ = corners;
+        parts.push(part);
+    }
     parts
 }

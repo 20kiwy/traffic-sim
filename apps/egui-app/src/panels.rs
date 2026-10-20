@@ -96,6 +96,7 @@ pub fn dock(app: &mut RoadkitApp, ctx: &egui::Context) {
                         .show(ui, |ui| match app.dock_tab {
                             DockTab::Layers if !app.is_popped(DockTab::Layers) => layers_content(app, ui),
                             DockTab::Properties if !app.is_popped(DockTab::Properties) => properties_content(app, ui),
+                            DockTab::Signals if !app.is_popped(DockTab::Signals) => signals_content(app, ui),
                             DockTab::Assets if !app.is_popped(DockTab::Assets) => assets_content(app, ui),
                             DockTab::Script if !app.is_popped(DockTab::Script) => script_content(app, ui),
                             DockTab::Console if !app.is_popped(DockTab::Console) => console_content(app, ui),
@@ -782,6 +783,62 @@ fn point_inspector(app: &mut RoadkitApp, ui: &mut egui::Ui, ci: usize, pi: usize
                     .on_hover_text("-1 = use the container / manager value")
                     .changed()
                 {
+                    changed = true;
+                }
+                ui.end_row();
+                // ---- JICA / OSM junction-approach properties ----
+                ui.label(RichText::new("turn_fwd (L→R)").size(11.5));
+                let mut tf = pt.turn_fwd.clone();
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut tf)
+                            .hint_text("left|through|through|right")
+                            .desired_width(150.0),
+                    )
+                    .on_hover_text("OSM turn:lanes for the FORWARD carriageway, leftmost→rightmost lane. JICA approaches: left|through|through|right (1L 2TH 1R)")
+                    .lost_focus()
+                {
+                    pt.turn_fwd = tf;
+                    changed = true;
+                }
+                ui.end_row();
+                ui.label(RichText::new("turn_rev (L→R)").size(11.5));
+                let mut tr = pt.turn_rev.clone();
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut tr)
+                            .hint_text("left|through|right")
+                            .desired_width(150.0),
+                    )
+                    .on_hover_text("OSM turn:lanes for the REVERSE carriageway (divider → outer edge)")
+                    .lost_focus()
+                {
+                    pt.turn_rev = tr;
+                    changed = true;
+                }
+                ui.end_row();
+                {
+                    let summary = pt.approach_summary();
+                    ui.label(RichText::new("approach").size(11.5));
+                    ui.label(
+                        RichText::new(summary)
+                            .size(10.5)
+                            .color(Color32::from_rgb(255, 214, 120)),
+                    )
+                    .on_hover_text("Lane split per movement parsed from the turn strings (L / TH / R — JICA Table 5.2.1 style)");
+                    ui.end_row();
+                }
+                ui.label(RichText::new("layer").size(11.5));
+                if ui
+                    .add(egui::DragValue::new(&mut pt.layer).range(-3..=5))
+                    .on_hover_text("OSM layer — 0 ground, 1 first flyover deck, -1 underpass. Different layers never join into at-grade junctions")
+                    .changed()
+                {
+                    changed = true;
+                }
+                ui.end_row();
+                ui.label(RichText::new("bridge deck").size(11.5));
+                if ui.checkbox(&mut pt.bridge, "").on_hover_text("Structured bridge deck: piers under the road, blocks at-grade junction detection across it (flyover support)").changed() {
                     changed = true;
                 }
                 ui.end_row();
@@ -1777,6 +1834,7 @@ pub fn floating_panels(app: &mut RoadkitApp, ctx: &egui::Context) {
                 .show(ui, |ui| match tab {
                     DockTab::Layers => layers_content(app, ui),
                     DockTab::Properties => properties_content(app, ui),
+                    DockTab::Signals => signals_content(app, ui),
                     DockTab::Assets => assets_content(app, ui),
                     DockTab::Script => script_content(app, ui),
                     DockTab::Console => console_content(app, ui),
@@ -1891,6 +1949,306 @@ pub fn dialogs(app: &mut RoadkitApp, ctx: &egui::Context) {
             });
         if !open {
             app.show_nodes_help = false;
+        }
+    }
+}
+
+/* ---- Signals dock: the intersection control registry --------------- */
+
+/// Every junction in the engine registry, its control plan, live head
+/// states and the JICA presets. Traffic lights are placed per approach
+/// and can be nudged here or dragged directly in the 3D viewport.
+fn signals_content(app: &mut RoadkitApp, ui: &mut egui::Ui) {
+    let t = tokens(ui.ctx());
+    ui.label(RichText::new("Intersection controls").size(13.5).color(t.text_strong));
+    ui.label(
+        RichText::new("engine registry — every junction, its control, its lights")
+            .size(10.5)
+            .color(t.text_dim),
+    );
+    ui.add_space(4.0);
+
+    // register the selected junction with one click
+    let sel_jpos = {
+        let sc = app.scene.borrow();
+        app.sel_junction
+            .and_then(|idx| sc.junctions.get(idx).map(|j| (idx, j.x, j.z, j.legs.len())))
+    };
+    if let Some((ji, x, z, legs)) = sel_jpos {
+        let controlled = app.signals.plan_at(x, z).is_some();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("J{} @ ({:.0}, {:.0}) · {} legs", ji + 1, x, z, legs)).size(11.0).color(t.text));
+            if controlled {
+                ui.label(RichText::new("registered").size(10.0).color(t.text_dim));
+            } else if ui.small_button("register").clicked() {
+                app.signals.add(x, z, roadkit::signals::preset_two_phase(90.0));
+                app.status = format!("junction J{} registered — default 2-phase signal", ji + 1);
+                app.render.sim = None;
+            }
+        });
+    } else {
+        ui.label(RichText::new("select a junction (plan view click or the Layers tree) to register a control").size(10.5).color(t.text_dim));
+    }
+    ui.add_space(6.0);
+    ui.separator();
+
+    /* ---- registry list ---- */
+    ui.label(RichText::new("Registry").size(12.0).color(t.text_strong));
+    if app.signals.entries.is_empty() {
+        ui.label(RichText::new("no controlled junctions — everything free-flow").size(10.5).color(t.text_dim));
+    }
+    let entries: Vec<(usize, f64, f64, String, String)> = app
+        .signals
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (i, e.x, e.z, e.plan.name.clone(), e.plan.control.label().to_string()))
+        .collect();
+    for (i, x, z, name, control) in entries {
+        ui.horizontal(|ui| {
+            let sel = app
+                .sel_junction
+                .and_then(|ji| {
+                    let sc = app.scene.borrow();
+                    sc.junctions.get(ji).map(|j| (j.x - x).hypot(j.z - z) < 12.0)
+                })
+                .unwrap_or(false);
+            let marker = if sel { "●" } else { "○" };
+            if ui
+                .selectable_label(sel, RichText::new(format!("{marker} {}", name)).size(11.0))
+                .clicked()
+            {
+                // select the nearest detected junction
+                let sc = app.scene.borrow();
+                app.sel_junction = sc
+                    .junctions
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| {
+                        let da = (a.1.x - x).hypot(a.1.z - z);
+                        let db = (b.1.x - x).hypot(b.1.z - z);
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .filter(|(_, j)| (j.x - x).hypot(j.z - z) < 14.0)
+                    .map(|(ji, _)| ji);
+                app.dock_tab = DockTab::Signals;
+            }
+            ui.label(RichText::new(format!("({:.0},{:.0})", x, z)).size(9.5).color(t.text_dim));
+            ui.label(RichText::new(control).size(9.5).color(t.text_dim));
+            if ui.small_button("×").on_hover_text("remove control (junction goes free-flow)").clicked() {
+                app.signals.remove_at(x, z);
+                app.render.sim = None;
+            }
+        });
+    }
+    ui.add_space(6.0);
+
+    /* ---- selected junction plan editor ---- */
+    if let Some((ji, jx, jz)) = sel_jpos.map(|(ji, x, z, _)| (ji, x, z)) {
+        ui.separator();
+        ui.label(RichText::new(format!("Junction J{} — signal plan", ji + 1)).size(12.0).color(t.text_strong));
+        let plan = app.signals.plan_at(jx, jz).cloned();
+        let Some(mut plan) = plan else {
+            ui.label(RichText::new("no control — add one:").size(10.5).color(t.text_dim));
+            ui.horizontal(|ui| {
+                if ui.small_button("signal").clicked() {
+                    app.signals.add(jx, jz, roadkit::signals::preset_two_phase(90.0));
+                    app.render.sim = None;
+                }
+                if ui.small_button("police").clicked() {
+                    let mut p = roadkit::signals::preset_two_phase(90.0);
+                    p.control = roadkit::Control::Police;
+                    app.signals.add(jx, jz, p);
+                    app.render.sim = None;
+                }
+                if ui.small_button("roundabout yield").clicked() {
+                    let mut p = roadkit::signals::preset_two_phase(90.0);
+                    p.control = roadkit::Control::Roundabout;
+                    app.signals.add(jx, jz, p);
+                    app.render.sim = None;
+                }
+            });
+            return;
+        };
+
+        // control kind
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("control").size(10.5).color(t.text_dim));
+            let kinds = [
+                roadkit::Control::Signal,
+                roadkit::Control::Police,
+                roadkit::Control::Roundabout,
+                roadkit::Control::Uncontrolled,
+            ];
+            for k in kinds {
+                if ui
+                    .selectable_label(plan.control == k, k.label())
+                    .clicked()
+                {
+                    plan.control = k;
+                    if let Some(p) = app.signals.plan_for_junction_mut(jx, jz) {
+                        p.control = k;
+                    }
+                    app.render.sim = None;
+                }
+            }
+        });
+
+        if plan.control == roadkit::Control::Signal {
+            // phase groups
+            ui.add_space(2.0);
+            ui.label(RichText::new(format!("cycle {:.0} s · {} phase groups", plan.cycle_s(), plan.groups.len())).size(10.5).color(t.text));
+            egui::Grid::new(("sig_groups", ji))
+                .num_columns(4)
+                .spacing([6.0, 2.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("group").size(9.5).color(t.text_dim));
+                    ui.label(RichText::new("green s").size(9.5).color(t.text_dim));
+                    ui.label(RichText::new("yellow").size(9.5).color(t.text_dim));
+                    ui.label(RichText::new("all-red").size(9.5).color(t.text_dim));
+                    ui.end_row();
+                    for gi in 0..plan.groups.len() {
+                        ui.label(RichText::new(format!("P{}", gi + 1)).size(10.0));
+                        let mut g = plan.groups[gi].green;
+                        let mut y = plan.groups[gi].yellow;
+                        let mut r = plan.groups[gi].all_red;
+                        if ui.add(egui::DragValue::new(&mut g).speed(0.5).range(1.0..=180.0)).changed() {
+                            if let Some(p) = app.signals.plan_for_junction_mut(jx, jz) {
+                                p.groups[gi].green = g;
+                            }
+                            app.render.sim = None;
+                        }
+                        if ui.add(egui::DragValue::new(&mut y).speed(0.1).range(0.0..=10.0)).changed() {
+                            if let Some(p) = app.signals.plan_for_junction_mut(jx, jz) {
+                                p.groups[gi].yellow = y;
+                            }
+                            app.render.sim = None;
+                        }
+                        if ui.add(egui::DragValue::new(&mut r).speed(0.1).range(0.0..=10.0)).changed() {
+                            if let Some(p) = app.signals.plan_for_junction_mut(jx, jz) {
+                                p.groups[gi].all_red = r;
+                            }
+                            app.render.sim = None;
+                        }
+                        ui.end_row();
+                    }
+                });
+            ui.horizontal(|ui| {
+                if ui.small_button("+ group").clicked() {
+                    if let Some(p) = app.signals.plan_for_junction_mut(jx, jz) {
+                        p.groups.push(roadkit::GroupTiming::default());
+                    }
+                    app.render.sim = None;
+                }
+                if ui.small_button("− group").clicked() && plan.groups.len() > 1 {
+                    if let Some(p) = app.signals.plan_for_junction_mut(jx, jz) {
+                        p.groups.pop();
+                    }
+                    app.render.sim = None;
+                }
+            });
+            // JICA presets
+            ui.add_space(3.0);
+            ui.label(RichText::new("JICA TR2 presets").size(10.0).color(t.text_dim));
+            ui.horizontal_wrapped(|ui| {
+                let presets: [(&str, roadkit::SignalPlan); 4] = [
+                    ("Tazara 4×(G20 Y3)", roadkit::signals::preset_tazara_4phase()),
+                    ("Ubungo 2-ph 130", roadkit::signals::preset_ubungo_2phase()),
+                    ("Ubungo 4-ph", roadkit::signals::preset_ubungo_4phase()),
+                    ("2-ph 90", roadkit::signals::preset_two_phase(90.0)),
+                ];
+                for (label, p) in presets {
+                    if ui.small_button(label).on_hover_text(&p.name).clicked() {
+                        if let Some(dst) = app.signals.plan_for_junction_mut(jx, jz) {
+                            dst.groups = p.groups.clone();
+                            dst.control = roadkit::Control::Signal;
+                        }
+                        app.render.sim = None;
+                    }
+                }
+            });
+            // live states
+            if let Some(sim) = app.render.sim.as_ref() {
+                if let Some(plan) = sim.plan_of(ji) {
+                    ui.add_space(3.0);
+                    ui.horizontal(|ui| {
+                        for gi in 0..plan.groups.len().max(1) {
+                            let st = plan.state_at(gi, sim.t);
+                            let (r, g, b) = (st.rgb()[0] * 255.0, st.rgb()[1] * 255.0, st.rgb()[2] * 255.0);
+                            let (col, name) = match st {
+                                roadkit::SignalState::Green => (Color32::from_rgb(g as u8, r as u8, b as u8), "GREEN"),
+                                roadkit::SignalState::Amber => (Color32::from_rgb(r as u8, g as u8, b as u8), "AMBER"),
+                                roadkit::SignalState::Red => (Color32::from_rgb(r as u8, g as u8, b as u8), "RED"),
+                                roadkit::SignalState::Off => (Color32::GRAY, "off"),
+                            };
+                            let _ = col;
+                            ui.label(
+                                RichText::new(format!("P{} {}", gi + 1, name))
+                                    .size(9.5)
+                                    .color(if st == roadkit::SignalState::Off { t.text_dim } else { t.text_strong }),
+                            );
+                        }
+                    });
+                }
+            }
+        }
+        ui.add_space(6.0);
+    }
+
+    /* ---- signal heads (traffic lights) ---- */
+    ui.separator();
+    ui.label(RichText::new("Traffic lights").size(12.0).color(t.text_strong));
+    match app.render.sim.as_ref() {
+        Some(sim) => {
+            ui.label(
+                RichText::new("click a head in 3D to select — drag it to move the light, or nudge here")
+                    .size(10.0)
+                    .color(t.text_dim),
+            );
+            let poses: Vec<(usize, usize, bool, bool, f64, f64)> = sim
+                .light_poses
+                .iter()
+                .enumerate()
+                .map(|(i, lp)| {
+                    let off = app
+                        .light_offsets
+                        .iter()
+                        .find(|o| o.junction == lp.junction && o.group == lp.group && o.positive_dir == lp.positive_dir)
+                        .map(|o| (o.dx, o.dz))
+                        .unwrap_or((0.0, 0.0));
+                    (i, lp.junction, lp.group, lp.positive_dir, off.0, off.1)
+                })
+                .collect();
+            ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                for (i, jn, group, pdir, dx, dz) in poses {
+                    ui.horizontal(|ui| {
+                        let sel = app.sel_light == Some(i);
+                        if ui
+                            .selectable_label(sel, RichText::new(format!("head #{i} · J{} · {} · {}", jn + 1, if group { "axis A" } else { "axis B" }, if pdir { "+s" } else { "−s" })).size(10.0))
+                            .clicked()
+                        {
+                            app.sel_light = Some(i);
+                        }
+                        if (dx.abs() > 0.01 || dz.abs() > 0.01) && sel {
+                            ui.label(RichText::new(format!("nudge ({:+.1}, {:+.1})", dx, dz)).size(9.5).color(t.text_dim));
+                            if ui.small_button("reset").clicked() {
+                                app.light_offsets.retain(|o| {
+                                    sim.light_poses.get(i).map(|lp| {
+                                        !(o.junction == lp.junction && o.group == lp.group && o.positive_dir == lp.positive_dir)
+                                    }).unwrap_or(true)
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        None => {
+            ui.label(
+                RichText::new("enable traffic in the 3D toolbar to place + drive the lights")
+                    .size(10.0)
+                    .color(t.text_dim),
+            );
         }
     }
 }

@@ -132,15 +132,21 @@ struct Flat {
     /// per-sample half paved width (lerped between the RoadPoints that
     /// bound each segment — per-point cross-section, GRG style)
     halfs: Vec<f64>,
+    /// per-sample road surface elevation (meters) — grade separation
+    elevs: Vec<f64>,
+    /// OSM-style layer (max over points) — 0 = ground, 1 = flyover deck
+    layer: i8,
 }
 
 fn flatten(c: &RoadCurve, sample_m: f64) -> Flat {
     // flatten per segment so each sample knows its t — this is what makes
     // junction legs pick up the width AT the junction, not at point 0
     let n_points = c.points.len();
+    let layer = c.max_layer();
     let seg_count = if c.closed { n_points } else { n_points - 1 };
     let mut pts: Vec<Vec2> = Vec::new();
     let mut halfs: Vec<f64> = Vec::new();
+    let mut elevs: Vec<f64> = Vec::new();
     for k in 0..seg_count {
         let a = &c.points[k];
         let b = &c.points[(k + 1) % n_points];
@@ -159,6 +165,7 @@ fn flatten(c: &RoadCurve, sample_m: f64) -> Flat {
             };
             pts.push(*p);
             halfs.push(hw_a + (hw_b - hw_a) * t);
+            elevs.push(a.elev + (b.elev - a.elev) * t);
         }
     }
     let mut yaw = Vec::with_capacity(pts.len());
@@ -167,7 +174,7 @@ fn flatten(c: &RoadCurve, sample_m: f64) -> Flat {
         let b = pts[(i + 1).min(pts.len() - 1)];
         yaw.push(atan2f(b.y - a.y, b.x - a.x));
     }
-    Flat { pts, yaw, halfs }
+    Flat { pts, yaw, halfs, elevs, layer }
 }
 
 #[allow(clippy::many_single_char_names)]
@@ -327,6 +334,16 @@ pub fn detect(curves: &[RoadCurve], s: &JunctionSettings) -> Vec<Junction> {
                     let d1 = (b.yaw[sj].cos(), b.yaw[sj].sin());
                     let ha = a.halfs[(si + 1).min(a.halfs.len() - 1)];
                     let hb = b.halfs[(sj + 1).min(b.halfs.len() - 1)];
+                    // GRADE SEPARATION (JICA §5.2.5 / §5.3.5 flyover
+                    // support): two curves on different OSM layers, or on
+                    // the same layer but physically separated by > 2.5 m
+                    // of elevation at the crossing, do NOT form an
+                    // at-grade junction — the flyover passes over.
+                    let ea = a.elevs[(si + 1).min(a.elevs.len() - 1)];
+                    let eb = b.elevs[(sj + 1).min(b.elevs.len() - 1)];
+                    if a.layer != b.layer || (ea - eb).abs() > 2.5 {
+                        continue;
+                    }
                     candidates.push(Candidate {
                         x: hit.x,
                         z: hit.y,
@@ -371,6 +388,18 @@ pub fn detect(curves: &[RoadCurve], s: &JunctionSettings) -> Vec<Junction> {
         // width of the through road AT the T-point (per-sample cross-section)
         let other_hw = flats[k].halfs[m.min(flats[k].halfs.len() - 1)];
         if d > other_hw + 1.5 {
+            continue;
+        }
+        // grade separation: an endpoint sitting under/over a flyover deck
+        // (different layer, or deck > 2.5 m above the stem) does NOT join
+        let stem_flat = &flats[e.curve];
+        let stem_elev = if e.end == 1 {
+            stem_flat.elevs.last().copied().unwrap_or(0.0)
+        } else {
+            stem_flat.elevs.first().copied().unwrap_or(0.0)
+        };
+        let body_elev = flats[k].elevs[m.min(flats[k].elevs.len() - 1)];
+        if flats[e.curve].layer != flats[k].layer || (stem_elev - body_elev).abs() > 2.5 {
             continue;
         }
         let dk = (flats[k].yaw[m].cos(), flats[k].yaw[m].sin());

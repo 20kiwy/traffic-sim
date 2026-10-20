@@ -58,6 +58,7 @@ impl TrafficToolkit {
         settings: ToolkitSettings,
     ) -> Self {
         let sim_settings = roadkit::traffic_sim::SimSettings {
+            left_hand: true,
             density: settings.density,
             time_scale: settings.time_scale,
             vmax: settings.vmax,

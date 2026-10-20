@@ -3,9 +3,11 @@
 //! GLB props joined along the procedural roads. Hidden layers are filtered
 //! before the scene build (the layer engine's eye).
 
-use crate::state::{RoadkitApp, RenderState};
+use crate::state::{LightOffset, RoadkitApp, RenderState, Tool};
 use egui::RichText;
 use gdmath::vec3::Vec3;
+use roads::model::RoadCurve;
+use roadkit::signals::SignalState;
 
 /// Rebuild the render scene when the script scene changed.
 pub fn ensure_scene(app: &mut RoadkitApp) {
@@ -51,14 +53,16 @@ pub fn ensure_scene(app: &mut RoadkitApp) {
         let first = app.render.scene3d.is_none();
         app.render.scene3d = Some(scene);
         app.render.dirty = false;
-        if first {
+        if first && !app.render.cam_seeded {
             // hero 3/4 framing (same math spirit as roadkit-cli frame_cam):
-            // fill the frame instead of floating far above the roads
+            // fill the frame instead of floating far above the roads —
+            // SKIPPED when a preset (DSM load) already placed the camera
             app.cam.target = Vec3::ZERO;
             app.cam.yaw = 0.55;
             app.cam.pitch = 0.55;
             app.cam.dist = (radius * 1.45).clamp(24.0, 20_000.0);
         }
+        app.render.cam_seeded = true;
     }
 }
 
@@ -96,11 +100,18 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 {
                     if app.render.sim_on && app.render.sim.is_none() {
                         let sc = app.scene.borrow();
-                        app.render.sim = Some(roadkit::TrafficSim::new(
-                            &sc.curves,
-                            &sc.junctions,
-                            roadkit::SimSettings { density: app.render.sim_density, ..Default::default() },
-                        ));
+                        app.render.sim = Some(
+                            roadkit::TrafficSim::new(
+                                &sc.curves,
+                                &sc.junctions,
+                                roadkit::SimSettings {
+                                    density: app.render.sim_density,
+                                    left_hand: app.render.sim_left_hand,
+                                    ..Default::default()
+                                },
+                            )
+                            .with_registry(&app.signals, &sc.junctions, &sc.curves),
+                        );
                     }
                     app.render.dirty = true;
                 }
@@ -157,11 +168,18 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                         let sc = app.scene.borrow();
                         sc.junctions.clone()
                     };
-                    app.render.sim = Some(roadkit::TrafficSim::new(
-                        &curves,
-                        &junctions,
-                        roadkit::SimSettings { density: app.render.sim_density, ..Default::default() },
-                    ));
+                    app.render.sim = Some(
+                        roadkit::TrafficSim::new(
+                            &curves,
+                            &junctions,
+                            roadkit::SimSettings {
+                                density: app.render.sim_density,
+                                left_hand: app.render.sim_left_hand,
+                                ..Default::default()
+                            },
+                        )
+                        .with_registry(&app.signals, &junctions, &curves),
+                    );
                 }
                 if let Some(sim) = &mut app.render.sim {
                     sim.step(1.0 / 30.0, &curves);
@@ -192,6 +210,10 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 };
                 rgba = roadkit::render_scene_props_env(target, &app.assets, &app.textures, &app.cam, w, h, env, &extra, app.render.show_props);
                 app.render.render_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                if std::env::var("ROADKIT_DUMP_PNG").is_ok() {
+                    let _ = std::fs::write("/tmp/app_render.raw", &rgba);
+                    eprintln!("[dump] wrote /tmp/app_render.raw {}x{}", w, h);
+                }
                 app.render.last_sig = sig;
                 app.render.dirty = false;
             }
@@ -220,6 +242,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             // ---- TerraZone ground grid (screen-space reference lines) ----
             if app.render.show_grid {
                 draw_ground_grid(app, ui, rect, &scene);
+                draw_grid_ruler(app, ui, rect);
             }
 
             // ---- RoadPoint markers: click to select, XYZ tripod on the
@@ -230,10 +253,84 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 None
             };
 
+            // ---- traffic-signal heads: poles + live state, click to
+            //      select (then nudge in the Signals panel / drag) ----
+            let light_hit = draw_traffic_lights(app, ui, rect, &response);
+
+            // ---- turn arrows / L·TH·R labels at the selected junction ----
+            if let Some(sim) = app.render.sim.as_ref() {
+                if let Some(ji) = app.sel_junction {
+                    let curves = { app.scene.borrow().curves.clone() };
+                    draw_turn_labels(app, ui, rect, sim, &curves, ji);
+                }
+            }
+
+            // ---- Terrazon cursor XYZ gizmo (ground crosshair + axes) ----
+            draw_cursor_gizmo(app, ui, rect, &response);
+
             // ---- interaction ----
             let shift = ctx.input(|i| i.modifiers.shift);
             let secondary = ctx.input(|i| i.pointer.secondary_down());
-            if response.dragged() {
+            // DRAW IN 3D: the AddPoint tool places RoadPoints on the ground
+            // plane under the cursor (same auto-join as the 2D plan view)
+            if response.clicked() && !secondary && !shift && point_hit.is_none() && light_hit.is_none() && app.tool == Tool::AddPoint {
+                if let Some([wx, _, wz]) = app.cursor_world {
+                    app.add_point_at(wx, wz);
+                    app.render.dirty = true;
+                }
+            }
+            // signal-head picking: click selects the nearest head (Lights
+            // panel shows its nudge values; drag nudges in 3D)
+            if response.clicked() && point_hit.is_none() {
+                if let Some(idx) = light_hit {
+                    app.sel_light = Some(idx);
+                    app.status = format!(
+                        "signal head #{idx} selected — nudge it here or in the Signals panel"
+                    );
+                }
+            }
+            // drag a selected head in world XZ (Terrazon move-gizmo feel)
+            let head_drag = app.sel_light.is_some()
+                && light_hit == app.sel_light
+                && !secondary
+                && !shift;
+            if response.dragged() && head_drag {
+                let d = response.drag_delta();
+                let view = app.cam.view();
+                let right = Vec3::new(view.m[0], 0.0, view.m[2]);
+                let rl = right.len().max(1e-4);
+                let right = right * (1.0 / rl);
+                let fwd = Vec3::new(-view.m[8], 0.0, -view.m[10]);
+                let fl = fwd.len().max(1e-4);
+                let fwd = fwd * (1.0 / fl);
+                let k = app.cam.dist * 0.0018;
+                if let Some(idx) = app.sel_light {
+                    let key = app.render.sim.as_ref().and_then(|s| s.light_poses.get(idx)).map(|lp| {
+                        (lp.junction, lp.group, lp.positive_dir)
+                    });
+                    if let Some((junction, group, positive_dir)) = key {
+                        let exists = app.light_offsets.iter().any(|o| {
+                            o.junction == junction && o.group == group && o.positive_dir == positive_dir
+                        });
+                        if !exists {
+                            app.light_offsets.push(LightOffset {
+                                junction,
+                                group,
+                                positive_dir,
+                                dx: 0.0,
+                                dz: 0.0,
+                            });
+                        }
+                        if let Some(o) = app.light_offsets.iter_mut().find(|o| {
+                            o.junction == junction && o.group == group && o.positive_dir == positive_dir
+                        }) {
+                            o.dx += (right.x * (d.x * k) - fwd.x * (d.y * k)) as f64;
+                            o.dz += (right.z * (d.x * k) - fwd.z * (d.y * k)) as f64;
+                        }
+                    }
+                }
+            }
+            if response.dragged() && !head_drag {
                 let d = response.drag_delta();
                 if secondary || shift {
                     // pan in the camera plane
@@ -936,5 +1033,306 @@ fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &r
         }
         let (width, base) = if i == 0 { (1.4, 100u8) } else { (1.0, 44u8) };
         ground_line(xa, z, xb, z, width, base);
+    }
+}
+
+/* ================= JICA / Terrazon overlays ================= */
+
+/// World→screen + camera ray helpers shared by the overlay set (same
+/// projection math as the raster and the point markers).
+struct OverlayCam {
+    view: gdmath::Mat4,
+    proj: gdmath::Mat4,
+    w: f32,
+    h: f32,
+    rect: egui::Rect,
+}
+
+impl OverlayCam {
+    fn new(app: &RoadkitApp, rect: egui::Rect) -> Self {
+        let (w, h) = (rect.width(), rect.height());
+        Self {
+            view: app.cam.view(),
+            proj: app.cam.proj(w / h),
+            w,
+            h,
+            rect,
+        }
+    }
+
+    fn xform(&self, x: f64, y: f64, z: f64) -> Option<(egui::Pos2, f32)> {
+        let v = self.view.transform_point(Vec3::new(x as f32, y as f32, z as f32)).0;
+        if v.z >= -0.05 {
+            return None;
+        }
+        let iw = -1.0 / v.z;
+        let ndc_x = v.x * iw * self.proj.m[0];
+        let ndc_y = v.y * iw * self.proj.m[5];
+        Some((
+            egui::Pos2::new(
+                self.rect.min.x + (ndc_x * 0.5 + 0.5) * self.w,
+                self.rect.min.y + (1.0 - (ndc_y * 0.5 + 0.5)) * self.h,
+            ),
+            -v.z,
+        ))
+    }
+
+    /// Pointer ray ∩ ground plane (y = plane_y) → world (x, y, z).
+    fn ground_hit(&self, app: &RoadkitApp, pointer: egui::Pos2, plane_y: f64) -> Option<(f64, f64, f64)> {
+        if !self.rect.contains(pointer) {
+            return None;
+        }
+        let eye = app.cam.eye();
+        // camera basis from the view matrix (right / up / -forward rows)
+        let fwd = Vec3::new(-self.view.m[8], -self.view.m[9], -self.view.m[10]).normalized();
+        let right = Vec3::new(self.view.m[0], self.view.m[1], self.view.m[2]).normalized();
+        let up = Vec3::new(self.view.m[4], self.view.m[5], self.view.m[6]).normalized();
+        let ndc_x = 2.0 * (pointer.x - self.rect.min.x) / self.w - 1.0;
+        let ndc_y = 1.0 - 2.0 * (pointer.y - self.rect.min.y) / self.h;
+        let tan_y = 1.0 / self.proj.m[5];
+        let tan_x = tan_y * (self.w / self.h);
+        let dir = (fwd + right * (ndc_x * tan_x) + up * (ndc_y * tan_y)).normalized();
+        if dir.y.abs() < 1e-5 {
+            return None;
+        }
+        let t = (plane_y - eye.y as f64) / dir.y as f64;
+        if t <= 0.0 || t > 50_000.0 {
+            return None;
+        }
+        let hx = eye.x as f64 + dir.x as f64 * t;
+        let hz = eye.z as f64 + dir.z as f64 * t;
+        Some((hx, plane_y, hz))
+    }
+}
+
+/// Terrazon cursor XYZ gizmo: where the pointer meets the ground, draw
+/// the red X / green Y / blue Z axis lines + a coordinate readout —
+/// "make cursor position have the zyx line position on the environment".
+fn draw_cursor_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, response: &egui::Response) {
+    let Some(pointer) = response.hover_pos() else {
+        app.cursor_world = None;
+        return;
+    };
+    let oc = OverlayCam::new(app, rect);
+    // project onto the road deck when the pointer sits over an elevated
+    // segment — else the ground plane
+    let mut plane_y = 0.0f64;
+    if let Some((ci, pi)) = nearest_elevated_point(app, pointer, &oc) {
+        plane_y = app.scene.borrow().curves[ci].points[pi].elev;
+    }
+    let Some((wx, wy, wz)) = oc.ground_hit(app, pointer, plane_y) else {
+        app.cursor_world = None;
+        return;
+    };
+    app.cursor_world = Some([wx, wy, wz]);
+
+    let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
+    let base = match oc.xform(wx, wy, wz) {
+        Some((p, _)) => p,
+        None => return,
+    };
+    // axis lines: 6 m world reach, min 26 px on screen (Terrazon feel)
+    const L: f64 = 6.0;
+    for (axis, letter, col) in [
+        (Vec3::new(1.0, 0.0, 0.0), "X", egui::Color32::from_rgb(214, 72, 64)),
+        (Vec3::new(0.0, 1.0, 0.0), "Y", egui::Color32::from_rgb(148, 196, 60)),
+        (Vec3::new(0.0, 0.0, 1.0), "Z", egui::Color32::from_rgb(78, 128, 220)),
+    ] {
+        let Some((tip, _)) = oc.xform(wx + axis.x as f64 * L, wy + axis.y as f64 * L, wz + axis.z as f64 * L) else {
+            continue;
+        };
+        let mut dv = tip - base;
+        let len = dv.length();
+        if len < 1e-3 {
+            continue;
+        }
+        if len < 26.0 {
+            dv = dv * (26.0 / len);
+        }
+        let end = base + dv;
+        painter.line_segment([base, end], egui::Stroke::new(1.6, col.gamma_multiply(0.95)));
+        painter.text(end + dv.normalized() * 8.0, egui::Align2::CENTER_CENTER, letter, egui::FontId::proportional(10.0), col);
+    }
+    painter.circle_filled(base, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
+    painter.circle_stroke(base, 5.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
+    painter.text(
+        base + egui::vec2(12.0, -12.0),
+        egui::Align2::LEFT_BOTTOM,
+        format!("x {:.1} · y {:.1} · z {:.1}", wx, wy, wz),
+        egui::FontId::monospace(10.5),
+        egui::Color32::from_rgba_unmultiplied(235, 235, 235, 230),
+    );
+}
+
+/// Closest elevated RoadPoint (bridge deck) under the pointer — used to
+/// snap the cursor plane onto flyover decks.
+fn nearest_elevated_point(app: &RoadkitApp, pointer: egui::Pos2, oc: &OverlayCam) -> Option<(usize, usize)> {
+    let sc = app.scene.borrow();
+    let mut best: Option<(f32, usize, usize)> = None;
+    for (ci, c) in sc.curves.iter().enumerate() {
+        if !c.visible || !c.has_elevated() {
+            continue;
+        }
+        for (pi, p) in c.points.iter().enumerate() {
+            if !p.elevated() {
+                continue;
+            }
+            let Some((sp, depth)) = oc.xform(p.x, p.elev, p.z) else { continue };
+            let d = (sp - pointer).length();
+            if d < 26.0 && best.map(|(bd, _, _)| d < bd).unwrap_or(true) {
+                best = Some((d, ci, pi));
+            }
+        }
+    }
+    best.map(|(_, ci, pi)| (ci, pi))
+}
+
+/// Traffic-signal heads: pole + 3-lamp head, live state colors from the
+/// sim. Click selects (nudge in the Signals panel or drag in 3D).
+fn draw_traffic_lights(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, response: &egui::Response) -> Option<usize> {
+    let sim = app.render.sim.as_ref()?;
+    let pointer = response.hover_pos().unwrap_or(egui::Pos2::new(f32::NAN, f32::NAN));
+    let oc = OverlayCam::new(app, rect);
+    let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
+    let fog_start = app.cam.dist + app.render.scene3d.as_ref().map(|s| s.radius_m).unwrap_or(100.0) * 0.55;
+    let fog_end = app.cam.dist + app.render.scene3d.as_ref().map(|s| s.radius_m).unwrap_or(100.0) * 3.4;
+    let fog = |depth: f32| 1.0 - ((depth - fog_start) / (fog_end - fog_start)).clamp(0.0, 1.0);
+
+    let mut hit: Option<(f32, usize)> = None;
+    for (i, lp) in sim.light_poses.iter().enumerate() {
+        let (dx, dz) = app
+            .light_offsets
+            .iter()
+            .find(|o| o.junction == lp.junction && o.group == lp.group && o.positive_dir == lp.positive_dir)
+            .map(|o| (o.dx, o.dz))
+            .unwrap_or((0.0, 0.0));
+        let x = lp.x + dx;
+        let z = lp.z + dz;
+        let state = sim.light_state(lp.junction, lp.group).unwrap_or(SignalState::Off);
+        let f = 0.35f64;
+        let (head_p, depth) = match oc.xform(x, lp.elev + f + 3.1, z) {
+            Some(v) => v,
+            None => continue,
+        };
+        let fade = fog(depth).clamp(0.25, 1.0);
+        // pole: ground → head
+        if let Some((base_p, _)) = oc.xform(x, lp.elev + f, z) {
+            painter.line_segment(
+                [base_p, head_p],
+                egui::Stroke::new(2.2, egui::Color32::from_rgba_unmultiplied(38, 40, 44, (235.0 * fade) as u8)),
+            );
+            painter.circle_filled(base_p, 2.0, egui::Color32::from_rgba_unmultiplied(38, 40, 44, (235.0 * fade) as u8));
+        }
+        // head box + 3 lamps (red / amber / green top-down)
+        let r = (140.0 / depth).clamp(2.2, 7.0);
+        let box_h = r * 3.4;
+        let box_w = r * 1.7;
+        painter.rect_filled(
+            egui::Rect::from_center_size(head_p, egui::vec2(box_w, box_h)),
+            r * 0.5,
+            egui::Color32::from_rgba_unmultiplied(24, 26, 30, (240.0 * fade) as u8),
+        );
+        for (k, (col, on)) in [
+            (egui::Color32::from_rgb(226, 50, 44), matches!(state, SignalState::Red)),
+            (egui::Color32::from_rgb(240, 180, 40), matches!(state, SignalState::Amber)),
+            (egui::Color32::from_rgb(60, 210, 90), matches!(state, SignalState::Green)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let cy = head_p.y - box_h / 2.0 + r * (0.7 + 1.0 * k as f32);
+            let c = if on { col } else { col.gamma_multiply(0.22) };
+            let c = if on { c.gamma_multiply(fade) } else { c.gamma_multiply(fade) };
+            painter.circle_filled(egui::Pos2::new(head_p.x, cy), r * 0.62, c);
+            if on {
+                painter.circle_stroke(egui::Pos2::new(head_p.x, cy), r * 0.85, egui::Stroke::new(1.2, c.gamma_multiply(0.5)));
+            }
+        }
+        // selection ring
+        let sel = app.sel_light == Some(i);
+        if sel {
+            painter.circle_stroke(head_p, box_h * 0.75, egui::Stroke::new(1.6, egui::Color32::from_rgb(255, 196, 90)));
+        }
+        // hit-test
+        if pointer.x.is_finite() {
+            let d = (head_p - pointer).length();
+            if d < 14.0 && hit.map(|(bd, _)| d < bd).unwrap_or(true) {
+                hit = Some((d, i));
+            }
+        }
+    }
+    hit.map(|(_, i)| i)
+}
+
+/// L·TH·R passage labels at the selected junction's approaches
+/// (JICA Table 5.2.1 / 5.3.1 style approach summaries).
+fn draw_turn_labels(
+    app: &RoadkitApp,
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    sim: &roadkit::TrafficSim,
+    curves: &[RoadCurve],
+    junction: usize,
+) {
+    let oc = OverlayCam::new(app, rect);
+    let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
+    for (x, z, y, label) in sim.approach_labels(curves, junction) {
+        let Some((p, depth)) = oc.xform(x, y + 0.25, z) else { continue };
+        if !rect.contains(p) {
+            continue;
+        }
+        let a = (255.0 - (depth - app.cam.dist).clamp(0.0, 900.0) / 900.0 * 200.0) as u8;
+        painter.rect_filled(
+            egui::Rect::from_center_size(p + egui::vec2(0.0, -9.0), egui::vec2(label.len() as f32 * 6.4 + 10.0, 15.0)),
+            3.0,
+            egui::Color32::from_rgba_unmultiplied(20, 22, 26, (a as f32 * 0.82) as u8),
+        );
+        painter.text(
+            p + egui::vec2(0.0, -9.0),
+            egui::Align2::CENTER_CENTER,
+            &label,
+            egui::FontId::monospace(10.0),
+            egui::Color32::from_rgba_unmultiplied(255, 214, 120, a),
+        );
+    }
+}
+
+/// Measured-grid rulers: a live scale bar + axis letters, so the 3D
+/// ground grid "is well measured in 3D".
+fn draw_grid_ruler(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect) {
+    let oc = OverlayCam::new(app, rect);
+    let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
+    let t = app.cam.target;
+    // 10 m bar from the target along the camera-right ground direction
+    let view = app.cam.view();
+    let right = Vec3::new(view.m[0], 0.0, view.m[2]).normalized();
+    let Some((a, _)) = oc.xform(t.x as f64, 0.05, t.z as f64) else { return };
+    let Some((b, _)) = oc.xform((t.x + right.x * 10.0) as f64, 0.05, (t.z + right.z * 10.0) as f64) else { return };
+    let len = (b - a).length();
+    if len < 6.0 || len > rect.width() * 0.5 {
+        return;
+    }
+    let p0 = egui::Pos2::new(rect.right() - 24.0 - len, rect.bottom() - 26.0);
+    let p1 = egui::Pos2::new(rect.right() - 24.0, rect.bottom() - 26.0);
+    painter.line_segment([p0, p1], egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(240, 240, 240, 200)));
+    for p in [p0, p1] {
+        painter.line_segment(
+            [egui::Pos2::new(p.x, p.y - 4.0), egui::Pos2::new(p.x, p.y + 4.0)],
+            egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(240, 240, 240, 200)),
+        );
+    }
+    painter.text(
+        egui::Pos2::new((p0.x + p1.x) / 2.0, p0.y - 7.0),
+        egui::Align2::CENTER_BOTTOM,
+        "10 m",
+        egui::FontId::monospace(10.0),
+        egui::Color32::from_rgba_unmultiplied(240, 240, 240, 210),
+    );
+    // axis letters along the world axes through the camera target
+    if let Some((ax, _)) = oc.xform(t.x as f64 + 40.0, 0.05, t.z as f64) {
+        painter.text(ax, egui::Align2::CENTER_CENTER, "X", egui::FontId::proportional(11.0), egui::Color32::from_rgba_unmultiplied(214, 90, 82, 200));
+    }
+    if let Some((az, _)) = oc.xform(t.x as f64, 0.05, t.z as f64 + 40.0) {
+        painter.text(az, egui::Align2::CENTER_CENTER, "Z", egui::FontId::proportional(11.0), egui::Color32::from_rgba_unmultiplied(96, 140, 230, 200));
     }
 }

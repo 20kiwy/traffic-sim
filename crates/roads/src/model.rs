@@ -81,6 +81,86 @@ pub enum Alignment {
     Divider,
 }
 
+/// Per-lane turn designation at a junction approach — the OSM
+/// `turn:lanes` vocabulary (what a lane may do at the next junction).
+/// The property panel and the junction overlay render these as
+/// left / through / right passages (JICA Table 5.2.1 / 5.3.1 style:
+/// each approach lists LT / TH / RT lanes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnDir {
+    Through,
+    Left,
+    Right,
+    LeftThrough,
+    ThroughRight,
+    LeftRight,
+    LeftThroughRight,
+    UTurn,
+    None,
+}
+
+impl TurnDir {
+    /// Short arrow-ish label for overlays (egui-safe ASCII).
+    pub fn label(&self) -> &'static str {
+        match self {
+            TurnDir::Through => "TH",
+            TurnDir::Left => "L",
+            TurnDir::Right => "R",
+            TurnDir::LeftThrough => "L|TH",
+            TurnDir::ThroughRight => "TH|R",
+            TurnDir::LeftRight => "L|R",
+            TurnDir::LeftThroughRight => "L|TH|R",
+            TurnDir::UTurn => "UT",
+            TurnDir::None => "-",
+        }
+    }
+
+    /// OSM `turn:lanes` token.
+    pub fn token(&self) -> &'static str {
+        match self {
+            TurnDir::Through => "through",
+            TurnDir::Left => "left",
+            TurnDir::Right => "right",
+            TurnDir::LeftThrough => "left;through",
+            TurnDir::ThroughRight => "through;right",
+            TurnDir::LeftRight => "left;right",
+            TurnDir::LeftThroughRight => "left;through;right",
+            TurnDir::UTurn => "u_turn",
+            TurnDir::None => "none",
+        }
+    }
+
+    pub fn from_token(t: &str) -> Self {
+        match t.trim().to_ascii_lowercase().as_str() {
+            "through" | "straight" | "th" => TurnDir::Through,
+            "left" | "l" => TurnDir::Left,
+            "right" | "r" => TurnDir::Right,
+            "left;through" | "through;left" => TurnDir::LeftThrough,
+            "through;right" | "right;through" => TurnDir::ThroughRight,
+            "left;right" | "right;left" => TurnDir::LeftRight,
+            "left;through;right" | "left;right;through" | "through;left;right" => {
+                TurnDir::LeftThroughRight
+            }
+            "u_turn" | "uturn" | "ut" | "reverse" => TurnDir::UTurn,
+            _ => TurnDir::None,
+        }
+    }
+}
+
+/// Parse an OSM `turn:lanes` string ("left|through;right") into one
+/// TurnDir per lane. `|` and `\n` separate lanes (OSM uses `|`);
+/// `;` inside a lane combines movements.
+pub fn parse_turn_lanes(s: &str) -> Vec<TurnDir> {
+    s.split(|c| c == '|' || c == '\\')
+        .map(TurnDir::from_token)
+        .collect()
+}
+
+/// Serialize a lane list back to the OSM token string.
+pub fn format_turn_lanes(lanes: &[TurnDir]) -> String {
+    lanes.iter().map(|t| t.token()).collect::<Vec<_>>().join("|")
+}
+
 /// One GRG RoadPoint: position + travel bearing + Bezier handle
 /// magnitudes + cross-section (lanes / widths).
 #[derive(Clone, Debug)]
@@ -142,6 +222,18 @@ pub struct RoadPoint {
     /// when true, bearing is auto-computed from the neighbouring points
     /// (chord direction) at build time — straight roads need no trig
     pub auto_bearing: bool,
+    /// Per-lane turn designations, FORWARD carriageway, OSM order
+    /// (leftmost → rightmost lane). Empty = unrestricted/undrawn.
+    pub turn_fwd: String,
+    /// Per-lane turn designations, REVERSE carriageway (divider →
+    /// outer edge, i.e. that carriageway's own left→right). Empty = none.
+    pub turn_rev: String,
+    /// OSM `layer`: vertical stacking level for grade separation
+    /// (0 = ground, 1 = first flyover deck, -1 = underpass…).
+    pub layer: i8,
+    /// structured bridge deck: renders piers + blocks at-grade junction
+    /// detection across this point (flyover support, JICA §5.2.5/5.3.5).
+    pub bridge: bool,
 }
 
 impl Default for RoadPoint {
@@ -175,6 +267,68 @@ impl Default for RoadPoint {
             dirt: false,
             surface: surface::ASPHALT,
             auto_bearing: false,
+            turn_fwd: String::new(),
+            turn_rev: String::new(),
+            layer: 0,
+            bridge: false,
+        }
+    }
+}
+
+impl RoadPoint {
+    /// Parsed FORWARD turn lanes (leftmost → rightmost).
+    pub fn turn_fwd_list(&self) -> Vec<TurnDir> {
+        parse_turn_lanes(&self.turn_fwd)
+    }
+
+    /// Parsed REVERSE turn lanes (divider → outer edge).
+    pub fn turn_rev_list(&self) -> Vec<TurnDir> {
+        parse_turn_lanes(&self.turn_rev)
+    }
+
+    /// True when this point sits on a structured bridge deck / flyover
+    /// (explicit flag, nonzero layer, or already elevated well above ground).
+    pub fn elevated(&self) -> bool {
+        self.bridge || self.layer != 0 || self.elev > 2.5
+    }
+
+    /// JICA-style approach cross-section string, e.g. "1L 2TH 1R".
+    /// Counts lanes per movement from the turn-lane lists (falls back to
+    /// lane counts when no turn data).
+    pub fn approach_summary(&self) -> String {
+        let count = |ls: &[TurnDir]| -> (usize, usize, usize) {
+            let mut lt = 0;
+            let mut th = 0;
+            let mut rt = 0;
+            for t in ls {
+                match t {
+                    TurnDir::Left | TurnDir::LeftRight | TurnDir::UTurn => lt += 1,
+                    TurnDir::Through => th += 1,
+                    TurnDir::Right => rt += 1,
+                    TurnDir::LeftThrough => {
+                        lt += 1;
+                        th += 1
+                    }
+                    TurnDir::ThroughRight => {
+                        th += 1;
+                        rt += 1
+                    }
+                    TurnDir::LeftThroughRight => {
+                        lt += 1;
+                        th += 1;
+                        rt += 1
+                    }
+                    TurnDir::None => {}
+                }
+            }
+            (lt, th, rt)
+        };
+        let (flt, fth, frt) = count(&self.turn_fwd_list());
+        let (rlt, rth, rrt) = count(&self.turn_rev_list());
+        if flt + fth + frt + rlt + rth + rrt == 0 {
+            format!("{}L", self.lanes)
+        } else {
+            format!("{flt}L {fth}TH {frt}R / {rlt}L {rth}TH {rrt}R")
         }
     }
 }
@@ -301,6 +455,10 @@ impl RoadPoint {
         self.underside_thickness = src.underside_thickness;
         self.dirt = src.dirt;
         self.surface = src.surface;
+        self.turn_fwd = src.turn_fwd.clone();
+        self.turn_rev = src.turn_rev.clone();
+        self.layer = src.layer;
+        self.bridge = src.bridge;
     }
 
     /// GRG `Flip RoadPoint`: swap prior/next, shoulders, reverse the
@@ -311,6 +469,7 @@ impl RoadPoint {
         std::mem::swap(&mut self.pathway_l, &mut self.pathway_r);
         // gutter_profile / underside_thickness / surface are orientation-
         // symmetric (no left/right split) — nothing to swap for them.
+        std::mem::swap(&mut self.turn_fwd, &mut self.turn_rev);
         self.bearing += std::f64::consts::PI;
     }
 
@@ -482,6 +641,17 @@ impl RoadCurve {
             Some(p) => p.lanes as f64 * p.lane_width + p.median + p.shoulder_l + p.shoulder_r,
             None => self.paved_width(),
         }
+    }
+
+    /// Highest |layer| on this curve (0 = pure ground road).
+    pub fn max_layer(&self) -> i8 {
+        self.points.iter().map(|p| p.layer).max().unwrap_or(0)
+    }
+
+    /// Any structured bridge deck / flyover segment on this curve
+    /// (grade separation — JICA §5.2.5 / §5.3.5 flyover support).
+    pub fn has_elevated(&self) -> bool {
+        self.points.iter().any(|p| p.bridge || p.layer != 0 || p.elev > 2.5)
     }
 
     /// Mode (most frequent) surface of this curve's RoadPoints — used to

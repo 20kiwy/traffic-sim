@@ -48,6 +48,17 @@ pub fn app_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
                         ui.close_menu();
                     }
                     ui.separator();
+                    // Dar es Salaam scenario — real OSM network + JICA TR2
+                    // engineering overlay (Kijazi flyover, Tazara, Igesa)
+                    if ui
+                        .button("Load Dar es Salaam (JICA + OSM)")
+                        .on_hover_text("Real DSM network: Sam Nujoma/Morogoro/Mandela/Nyerere from OSM + the Kijazi split flyover, Tazara 540 m flyover, BRT Ph-1 median, 1L·2TH·1R approaches, 120/130 s signal plans")
+                        .clicked()
+                    {
+                        app.load_dsm();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     ui.label(RichText::new("bundled demos").size(10.0).color(t.text_dim));
                     for (i, (label, _, _)) in crate::scripts::all().into_iter().enumerate() {
                         let mut idx = app.script_idx;

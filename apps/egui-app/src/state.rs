@@ -59,6 +59,7 @@ pub enum ScriptStatus {
 pub enum DockTab {
     Layers,
     Properties,
+    Signals,
     Assets,
     Script,
     Console,
@@ -66,9 +67,10 @@ pub enum DockTab {
 }
 
 impl DockTab {
-    pub const ALL: [DockTab; 6] = [
+    pub const ALL: [DockTab; 7] = [
         DockTab::Layers,
         DockTab::Properties,
+        DockTab::Signals,
         DockTab::Assets,
         DockTab::Script,
         DockTab::Console,
@@ -78,6 +80,7 @@ impl DockTab {
         match self {
             DockTab::Layers => "Layers",
             DockTab::Properties => "Properties",
+            DockTab::Signals => "Signals",
             DockTab::Assets => "Assets",
             DockTab::Script => "Script",
             DockTab::Console => "Console",
@@ -88,6 +91,9 @@ impl DockTab {
         match self {
             DockTab::Layers => egui_kit::IconName::Layers,
             DockTab::Properties => egui_kit::IconName::Sliders,
+            // traffic light dot glyph — the kit's beacon/lamp icon if present,
+            // else the console glyph reads as a head
+            DockTab::Signals => egui_kit::IconName::Console,
             DockTab::Assets => egui_kit::IconName::Box,
             DockTab::Script => egui_kit::IconName::Script,
             DockTab::Console => egui_kit::IconName::Console,
@@ -100,6 +106,7 @@ impl DockTab {
         match self {
             DockTab::Layers => "Layer",
             DockTab::Properties => "Props",
+            DockTab::Signals => "Signal",
             DockTab::Assets => "Asset",
             DockTab::Script => "Code",
             DockTab::Console => "Log",
@@ -113,6 +120,7 @@ impl DockTab {
 pub struct Panels {
     pub layers: bool,
     pub properties: bool,
+    pub signals: bool,
     pub assets: bool,
     pub script: bool,
     pub console: bool,
@@ -123,7 +131,7 @@ impl Default for Panels {
     fn default() -> Self {
         // Terrazon parity: only Layers + Properties docked; Assets/Script/
         // Console/History live on the icon column until wanted.
-        Self { layers: true, properties: true, assets: false, script: false, console: false, history: false }
+        Self { layers: true, properties: true, signals: false, assets: false, script: false, console: false, history: false }
     }
 }
 
@@ -134,6 +142,7 @@ impl Panels {
         match tab {
             DockTab::Layers => self.layers,
             DockTab::Properties => self.properties,
+            DockTab::Signals => self.signals,
             DockTab::Assets => self.assets,
             DockTab::Script => self.script,
             DockTab::Console => self.console,
@@ -144,6 +153,7 @@ impl Panels {
         match tab {
             DockTab::Layers => self.layers = on,
             DockTab::Properties => self.properties = on,
+            DockTab::Signals => self.signals = on,
             DockTab::Assets => self.assets = on,
             DockTab::Script => self.script = on,
             DockTab::Console => self.console = on,
@@ -170,11 +180,16 @@ pub struct RenderState {
     pub sim: Option<roadkit::TrafficSim>,
     pub sim_on: bool,
     pub sim_density: f64,
+    /// left-hand traffic (Tanzania) — set when the DSM scenario loads
+    pub sim_left_hand: bool,
     /// last CPU render duration (ms) — shown in the HUD
     pub render_ms: f32,
     /// signature of the last rendered frame (camera + size + toggles);
     /// when it matches and nothing is dirty the cached texture is reused
     pub last_sig: u64,
+    /// a preset (DSM load / launch flag) already placed the camera —
+    /// suppress the automatic hero framing on the first scene build
+    pub cam_seeded: bool,
 }
 
 impl Default for RenderState {
@@ -191,8 +206,10 @@ impl Default for RenderState {
             sim: None,
             sim_on: false,
             sim_density: 14.0,
+            sim_left_hand: false,
             render_ms: 0.0,
             last_sig: 0,
+            cam_seeded: false,
         }
     }
 }
@@ -220,6 +237,18 @@ pub struct RoadkitApp {
     pub sel_junction: Option<usize>,
     /// drag state for the plan view
     pub dragging: Option<DragKind>,
+
+    /* ---- Intersection control registry (Signals dock) ---- */
+    /// every controlled junction registers here (position-anchored)
+    pub signals: roadkit::SignalRegistry,
+    /// user nudges of traffic-light heads: (junction, group, +s, dx, dz)
+    pub light_offsets: Vec<LightOffset>,
+    /// selected signal head (index into sim.light_poses)
+    pub sel_light: Option<usize>,
+    /// 3D-viewport cursor ground hit (XYZ gizmo + status readout)
+    pub cursor_world: Option<[f64; 3]>,
+    /// the Dar es Salaam (JICA + OSM) scenario is loaded
+    pub dsm_loaded: bool,
 
     pub panels: Panels,
     /// active dock tab (must be one of the open ones)
@@ -261,6 +290,18 @@ pub struct RoadkitApp {
 
 /// GRG "Add next RoadPoint" spacing multiplier (lane_width × 8).
 pub const SEG_DIST_MULT: f64 = 8.0;
+
+/// A user nudge applied to one traffic-signal head (Signals panel +
+/// 3D drag). Keyed by (junction, group, +s travel) so it survives sim
+/// rebuilds; (dx, dz) is the offset from the auto-computed pole spot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightOffset {
+    pub junction: usize,
+    pub group: bool,
+    pub positive_dir: bool,
+    pub dx: f64,
+    pub dz: f64,
+}
 /// Sanity cap for the lane buttons (GRG has no cap; the mesh does fine but
 /// the trim sheet only has so many lane columns).
 pub const MAX_LANES: usize = 12;
@@ -274,6 +315,10 @@ pub struct LaunchConfig {
     pub tab: Option<Tab>,
     /// active dock tab override (screenshots / presets)
     pub dock_tab: Option<DockTab>,
+    /// load the Dar es Salaam (JICA + OSM) scenario instead of the demo
+    pub dsm: bool,
+    /// camera radius (m) for the DSM opening frame
+    pub dsm_radius: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -397,6 +442,11 @@ impl RoadkitApp {
             sel_container: None,
             sel_junction: None,
             dragging: None,
+            signals: roadkit::SignalRegistry::default(),
+            light_offsets: Vec::new(),
+            sel_light: None,
+            cursor_world: None,
+            dsm_loaded: false,
             panels: Panels::default(),
             dock_tab: DockTab::Layers,
             dock_collapsed: false,
@@ -448,6 +498,14 @@ impl RoadkitApp {
         // First impression: build the demo scene so GLB props are already
         // joined along the road when the app opens.
         app.run_script();
+        if cfg.dsm {
+            app.load_dsm();
+            // optional close-up radius override (site framing comes from
+            // load_dsm — it aims at the post-recenter site position)
+            if cfg.dsm_radius > 0.0 {
+                app.cam.dist = cfg.dsm_radius;
+            }
+        }
         // seed the undo history with the freshly built demo scene (the
         // History::new() seed keeps its "Initial state" label)
         app.history.entries[0].scene = app.scene.borrow().clone();
@@ -687,6 +745,80 @@ impl RoadkitApp {
     }
 
     /* ---------------- editing helpers ---------------- */
+
+    /// Load the Dar es Salaam scenario: real OSM ground network (Sam
+    /// Nujoma / Morogoro / Nelson Mandela / Nyerere / Shekilango / Igesa
+    /// + locals + footways) with the JICA TR2 engineering overlay —
+    /// Kijazi split flyover + BRT median, Tazara 540 m flyover,
+    /// 1L·2TH·1R turn approaches, 120/130 s signal plans (left-hand
+    /// traffic). Replaces the current scene.
+    pub fn load_dsm(&mut self) {
+        let dsm = roadkit::build_dsm();
+        let n_curves = dsm.curves.len();
+        let n_signals = dsm.registry.entries.len();
+        let pois = dsm.pois.clone();
+        {
+            let mut sc = self.scene.borrow_mut();
+            sc.curves = dsm.curves;
+            sc.props.clear();
+            // real city corridor (9 km across) — the terrain heightfield is
+            // a demo-scale feature and would oversize on this bbox
+            sc.terrain.enabled = false;
+            sc.lanes.clear();
+            sc.lanes_editable = false;
+            sc.recompute_junctions();
+        }
+        self.render.cam_seeded = true;
+        self.signals = dsm.registry;
+        self.light_offsets.clear();
+        self.sel_light = None;
+        self.sel = None;
+        self.sel_container = None;
+        self.sel_junction = None;
+        self.dsm_loaded = true;
+        self.render.sim_left_hand = true; // Tanzania drives on the left
+        self.render.sim = None;
+        self.render.dirty = true;
+        self.script_status = ScriptStatus::Ok(format!(
+            "Dar es Salaam loaded — {n_curves} curves · {n_signals} controlled junctions (JICA TR2)"
+        ));
+        self.status = format!(
+            "DSM: {} curves, {} signals — Kijazi {}, Tazara {}, Igesa {} (LHT)",
+            n_curves,
+            n_signals,
+            pois.first().map(|p| p.0.as_str()).unwrap_or(""),
+            pois.get(2).map(|p| p.0.as_str()).unwrap_or(""),
+            pois.get(3).map(|p| p.0.as_str()).unwrap_or(""),
+        );
+        // frame the Kijazi interchange (POI 0). The render scene subtracts
+        // the whole-corridor bbox center, so aim the camera at the NEGATED
+        // center — that is where Kijazi lands in render space.
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut min_z = f64::INFINITY;
+        let mut max_z = f64::NEG_INFINITY;
+        let sc = self.scene.borrow();
+        for c in &sc.curves {
+            for p in &c.points {
+                min_x = min_x.min(p.x);
+                max_x = max_x.max(p.x);
+                min_z = min_z.min(p.z);
+                max_z = max_z.max(p.z);
+            }
+        }
+        drop(sc);
+        let (cx, cz) = (
+            (min_x + max_x) / 2.0,
+            (min_z + max_z) / 2.0,
+        );
+        self.cam.target = gdmath::Vec3::new(-cx as f32, 0.0, -cz as f32);
+        self.cam.dist = 620.0;
+        self.cam.pitch = 0.62;
+        self.cam.yaw = 0.65;
+        self.plan.cx = 0.0;
+        self.plan.cz = 0.0;
+        self.plan.scale = 0.55;
+    }
 
     /// World-space plan transform helpers.
     pub fn plan_to_screen(&self, p: Vec2, rect: &egui::Rect) -> egui::Pos2 {

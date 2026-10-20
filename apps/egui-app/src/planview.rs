@@ -104,14 +104,26 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                         Stroke::new((median_w * app.plan.scale).max(1.5) as f32, if median_w >= 3.0 { color32([190, 186, 178], 1.0) } else { color32([150, 146, 138], 1.0) }),
                     ));
                 }
+                // flyover / bridge deck styling (grade separation): amber
+                // dashed halo + layer tag so decks read above ground roads
+                if c.has_elevated() {
+                    draw_dashed(
+                        &painter,
+                        &pts,
+                        color32([232, 176, 74], 0.9),
+                        (paved_px * 0.5).max(1.2),
+                        (10.0, 7.0),
+                    );
+                }
                 // label
                 let first = pts[0];
+                let tag = if c.has_elevated() { " · flyover L1" } else { "" };
                 painter.text(
                     Pos2::new(first.x + 8.0, first.y - 8.0),
                     egui::Align2::LEFT_BOTTOM,
-                    &c.name,
+                    format!("{}{}", c.name, tag),
                     egui::FontId::proportional(11.0),
-                    if selected { t.accent } else { t.text_dim },
+                    if selected { t.accent } else if c.has_elevated() { Color32::from_rgb(232, 176, 74) } else { t.text_dim },
                 );
             }
 
@@ -216,13 +228,61 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     Pos2::new(c.x, c.y - 10.0),
                     egui::Align2::CENTER_BOTTOM,
                     format!(
-                        "{} · {} legs",
+                        "{} · {} legs{}",
                         if j.kind == roads::JunctionKind::Roundabout { "roundabout" } else { "junction" },
-                        j.legs.len()
+                        j.legs.len(),
+                        if app.signals.plan_at(j.x, j.z).is_some() { " · controlled" } else { "" },
                     ),
                     egui::FontId::proportional(9.5),
                     if selected { t.accent } else { t.text_dim },
                 );
+            }
+
+            // ---------- signal overlays (registry + live sim state) ----------
+            {
+                let sim = app.render.sim.as_ref();
+                for (ji, j) in junctions.iter().enumerate() {
+                    let Some(plan) = app.signals.plan_at(j.x, j.z) else { continue };
+                    let sp = app.plan_to_screen(Vec2::new(j.x, j.z), &rect);
+                    if !rect.contains(sp) {
+                        continue;
+                    }
+                    // one dot per phase group around the junction center
+                    for gi in 0..plan.groups.len().max(1) {
+                        let st = match sim {
+                            Some(s) => plan.state_at(gi, s.t),
+                            None => match plan.control {
+                                roadkit::Control::Signal => roadkit::SignalState::Off,
+                                roadkit::Control::Police => roadkit::SignalState::Amber,
+                                _ => roadkit::SignalState::Off,
+                            },
+                        };
+                        let rgb = st.rgb();
+                        let col = Color32::from_rgb((rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8);
+                        let ang = gi as f32 * std::f32::consts::TAU / plan.groups.len().max(1) as f32 - std::f32::consts::FRAC_PI_2;
+                        let dot = Pos2::new(sp.x + ang.cos() * 11.0, sp.y + ang.sin() * 11.0);
+                        painter.circle_filled(dot, 3.4, col);
+                        painter.circle_stroke(dot, 3.4, Stroke::new(0.8, Color32::from_black_alpha(150)));
+                    }
+                }
+                // L·TH·R passage labels at the selected junction
+                if let (Some(s), Some(ji)) = (sim, app.sel_junction) {
+                    if junctions.get(ji).is_some() {
+                        for (x, z, _y, label) in s.approach_labels(&curves, ji) {
+                            let sp = app.plan_to_screen(Vec2::new(x, z), &rect);
+                            if !rect.contains(sp) {
+                                continue;
+                            }
+                            painter.text(
+                                Pos2::new(sp.x, sp.y - 6.0),
+                                egui::Align2::CENTER_BOTTOM,
+                                &label,
+                                egui::FontId::monospace(9.5),
+                                color32([255, 214, 120], 1.0),
+                            );
+                        }
+                    }
+                }
             }
 
             // ---------- props ----------
@@ -343,6 +403,33 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             // ---------- interaction ----------
             let pointer = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
             let world = pointer.map(|p| app.screen_to_plan(p, &rect));
+
+            // cursor XYZ crosshair (Terrazon-style 2D guides): thin axis
+            // lines through the pointer + a world-coordinate readout, and
+            // the same value the 3D viewport gizmo reports
+            if let Some((p, w)) = pointer.zip(world.clone()) {
+                let guide = Color32::from_rgba_unmultiplied(214, 90, 82, 40);
+                let guide_z = Color32::from_rgba_unmultiplied(96, 140, 230, 40);
+                painter.line_segment(
+                    [Pos2::new(rect.left(), p.y), Pos2::new(rect.right(), p.y)],
+                    Stroke::new(1.0, guide_z),
+                );
+                painter.line_segment(
+                    [Pos2::new(p.x, rect.top()), Pos2::new(p.x, rect.bottom())],
+                    Stroke::new(1.0, guide),
+                );
+                painter.circle_stroke(p, 5.0, Stroke::new(1.0, t.text_dim));
+                painter.text(
+                    Pos2::new(p.x + 10.0, p.y - 8.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!("x {:.1} · z {:.1}", w.x, w.y),
+                    egui::FontId::monospace(10.0),
+                    t.text,
+                );
+                app.cursor_world = Some([w.x, 0.0, w.y]);
+            } else if app.tab == crate::state::Tab::Plan {
+                app.cursor_world = None;
+            }
 
             // snap indicator while dragging an endpoint near another endpoint
             if let Some(DragKind::Point { curve, point: _ }) = app.dragging {

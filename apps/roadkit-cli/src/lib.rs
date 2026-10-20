@@ -643,3 +643,153 @@ pub fn encode_png(out: &std::path::Path, rgba: &[u8], w: u32, h: u32) -> Result<
     }
     std::fs::write(out, &buf).map_err(|e| format!("write {}: {e}", out.display()))
 }
+
+/* ---- Dar es Salaam (JICA + OSM) scenario renders ------------------ */
+
+/// Build the DSM world: real OSM ground network + the JICA TR2 overlay
+/// (Kijazi split flyover, Tazara 540 m flyover, BRT median, signals).
+pub fn build_world_dsm() -> Result<(World, roadkit::SignalRegistry), String> {
+    let dsm = roadkit::build_dsm();
+    let mut st = SceneState::default();
+    let n = dsm.curves.len();
+    let n_sig = dsm.registry.entries.len();
+    st.curves = dsm.curves;
+    st.console.push(format!("dsm: {n} curves · {n_sig} controlled junctions (JICA TR2)"));
+    st.auto_join();
+    let assets = {
+        let mut c = std::env::current_dir().map_err(|e| e.to_string())?;
+        loop {
+            if c.join("assets/glb").exists() {
+                break c.join("assets");
+            }
+            if !c.pop() {
+                return Err("assets dir not found".into());
+            }
+        }
+    };
+    Ok((
+        World {
+            library: AssetLibrary::load_dir(&assets),
+            textures: TextureLibrary::load_dir(&assets.join("textures")),
+            scene: st,
+        },
+        dsm.registry,
+    ))
+}
+
+/// Render the DSM scenario: one plan view + per-site 3D shots with the
+/// registry-driven signals + left-hand traffic. Each site is rendered in
+/// its own LOCAL frame (curves shifted so the site sits at the origin) —
+/// the 9 km corridor would otherwise melt into the distance fog.
+#[allow(clippy::too_many_arguments)]
+pub fn render_dsm(
+    sites: &[(f64, f64, &str)],
+    w: u32,
+    h: u32,
+    ss: usize,
+    sim_seconds: f64,
+    density: f64,
+) -> Result<Vec<String>, String> {
+    let mut outs = Vec::new();
+    // whole-corridor plan view (raw coordinates)
+    {
+        let dsm_full = roadkit::build_dsm();
+        let mut st = SceneState::default();
+        st.curves = dsm_full.curves.clone();
+        st.auto_join();
+        let assets = find_assets_dir_cwd()?;
+        let world_plan = World {
+            library: AssetLibrary::load_dir(&assets),
+            textures: TextureLibrary::load_dir(&assets.join("textures")),
+            scene: st,
+        };
+        let plan = plan_render(&world_plan, 0.05, w as usize, h as usize);
+        let plan_out = std::path::PathBuf::from("dsm_plan.png");
+        encode_png(&plan_out, &plan, w, h)?;
+        outs.push(plan_out.display().to_string());
+    }
+
+    let assets = find_assets_dir_cwd()?;
+    let library = AssetLibrary::load_dir(&assets);
+    let textures = TextureLibrary::load_dir(&assets.join("textures"));
+    for (sx, sz, name) in sites {
+        // LOCAL scenario: curves within ~700 m, site at the origin — the
+        // 9 km corridor otherwise melts into the distance fog
+        let dsm = roadkit::build_dsm_local((*sx, *sz), 700.0);
+        let junctions = roads::junction::detect(&dsm.curves, &Default::default());
+        let cam = frame_cam_focused(&dsm.curves, w as usize, h as usize, Some((0.0, 0.0, 250.0)));
+        let mut props: Vec<roadkit::PropInstance> = Vec::new();
+        if sim_seconds > 0.0 {
+            let mut sim = roadkit::TrafficSim::new(
+                &dsm.curves,
+                &junctions,
+                roadkit::SimSettings { density, left_hand: true, ..Default::default() },
+            )
+            .with_registry(&dsm.registry, &junctions, &dsm.curves);
+            let steps = (sim_seconds / 0.1).ceil() as usize;
+            for _ in 0..steps {
+                sim.step(0.1, &dsm.curves);
+            }
+            props = sim.prop_instances(&dsm.curves);
+        }
+        let scene = build_scene_with_bg(&dsm.curves, &junctions, &props, &library, true, roadkit::ENV_DAY.clear);
+        eprintln!("[dsm] {name}: cam.dist={:.0} radius={:.0} curves={} junctions={} lights={}", cam.dist, scene.radius_m, dsm.curves.len(), junctions.len(), dsm.registry.entries.len());
+        let rgba = if ss > 1 {
+            let big = render_scene_env(&scene, &library, &textures, &cam, w as usize * ss, h as usize * ss, roadkit::ENV_DAY, &[]);
+            box_downsample(&big, w as usize * ss, h as usize * ss, ss)
+        } else {
+            render_scene_env(&scene, &library, &textures, &cam, w as usize, h as usize, roadkit::ENV_DAY, &[])
+        };
+        let out = std::path::PathBuf::from(format!("dsm_{name}.png"));
+        encode_png(&out, &rgba, w, h)?;
+        outs.push(out.display().to_string());
+    }
+    Ok(outs)
+}
+
+/// Debug: replicate the APP's exact path (full scene, center-subtracted,
+/// camera at the negated bbox center) to diagnose the thin-roads bug.
+pub fn render_dsm_appcam(w: u32, h: u32) -> Result<(), String> {
+    let dsm = roadkit::build_dsm();
+    let junctions = roads::junction::detect(&dsm.curves, &Default::default());
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_z = f64::INFINITY;
+    let mut max_z = f64::NEG_INFINITY;
+    for c in &dsm.curves {
+        for p in &c.points {
+            min_x = min_x.min(p.x);
+            max_x = max_x.max(p.x);
+            min_z = min_z.min(p.z);
+            max_z = max_z.max(p.z);
+        }
+    }
+    let cx = ((min_x + max_x) / 2.0) as f32;
+    let cz = ((min_z + max_z) / 2.0) as f32;
+    let assets = find_assets_dir_cwd()?;
+    let library = AssetLibrary::load_dir(&assets);
+    let textures = TextureLibrary::load_dir(&assets.join("textures"));
+    let scene = build_scene_with_bg(&dsm.curves, &junctions, &[], &library, true, roadkit::ENV_DAY.clear);
+    eprintln!("[appcam] scene.radius={} center=({cx},{cz})", scene.radius_m);
+    let cam = OrbitCam {
+        target: gdmath::Vec3::new(-cx, 0.0, -cz),
+        dist: 420.0,
+        pitch: 0.62,
+        yaw: 0.65,
+    };
+    let rgba = render_scene_env(&scene, &library, &textures, &cam, w as usize, h as usize, roadkit::ENV_DAY, &[]);
+    encode_png(std::path::Path::new("dsm_appcam.png"), &rgba, w, h)?;
+    Ok(())
+}
+
+fn find_assets_dir_cwd() -> Result<std::path::PathBuf, String> {
+    let mut c = std::env::current_dir().map_err(|e| e.to_string())?;
+    loop {
+        if c.join("assets/glb").exists() {
+            return Ok(c.join("assets"));
+        }
+        if !c.pop() {
+            return Err("assets dir not found".into());
+        }
+    }
+}

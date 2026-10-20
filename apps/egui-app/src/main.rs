@@ -36,6 +36,8 @@ fn main() -> eframe::Result {
         println!("                           list_actions, do_action, get_assets");
         println!("  roadkit-godot [--script file.gd] [--tab plan|3d]");
         println!("                           preload a script and/or start tab");
+        println!("  roadkit-godot --dsm [--dsm-radius M] [--panel signals]");
+        println!("                           open on the Dar es Salaam (JICA + OSM) scenario");
         return Ok(());
     }
 
@@ -51,6 +53,14 @@ fn main() -> eframe::Result {
             Some("plan") => cfg.tab = Some(Tab::Plan),
             Some("3d") => cfg.tab = Some(Tab::Scene3d),
             _ => {}
+        }
+    }
+    if args.iter().any(|a| a == "--dsm") {
+        cfg.dsm = true;
+        if let Some(r) = args.iter().position(|a| a == "--dsm-radius") {
+            if let Some(v) = args.get(r + 1).and_then(|s| s.parse().ok()) {
+                cfg.dsm_radius = v;
+            }
         }
     }
     if let Some(i) = args.iter().position(|a| a == "--panel") {

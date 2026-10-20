@@ -31,6 +31,45 @@ fn arg_of(args: &[String], flag: &str) -> Option<String> {
 }
 
 fn cli_run(args: &[String]) -> i32 {
+    // Dar es Salaam scenario: real OSM network + JICA TR2 overlay
+    if args.iter().any(|a| a == "--dsm-appcam") {
+        return match roadkit_cli::render_dsm_appcam(1280, 800) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
+    if args.iter().any(|a| a == "--dsm") {
+        let w: u32 = arg_of(args, "--size")
+            .and_then(|s| s.split('x').next().and_then(|v| v.parse().ok()))
+            .unwrap_or(1280);
+        let h: u32 = arg_of(args, "--size")
+            .and_then(|s| s.split('x').nth(1).and_then(|v| v.parse().ok()))
+            .unwrap_or(800);
+        let ss: usize = arg_of(args, "--ss").and_then(|s| s.parse().ok()).unwrap_or(2).clamp(1, 4);
+        let sim: f64 = arg_of(args, "--sim").and_then(|s| s.parse().ok()).unwrap_or(20.0);
+        let density: f64 = arg_of(args, "--density").and_then(|s| s.parse().ok()).unwrap_or(14.0);
+        // Kijazi (0,0), Tazara (3261, 8647), Igesa (1680, -1592)
+        let sites = [
+            (0.0, 0.0, "kijazi"),
+            (3261.0, 8647.0, "tazara"),
+            (1680.0, -1592.0, "igesa"),
+        ];
+        return match roadkit_cli::render_dsm(&sites, w, h, ss, sim, density) {
+            Ok(files) => {
+                for f in &files {
+                    println!("saved {f}");
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
     // data-driven mode: import OSM/Mapbox raw data via tsdata + render
     if let Some(site) = arg_of(args, "--data") {
         let cfg = yakui_app::RunConfig {
