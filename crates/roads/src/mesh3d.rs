@@ -262,6 +262,15 @@ struct Sweep {
     unpaved: Vec<bool>,
     /// effective underside thickness per sample (0 = none)
     unders: Vec<f64>,
+    /// right-of-travel basis per sample. GRG vector alignment: at segment
+    /// boundaries this is the RoadPoint's OWN bearing (exact transform
+    /// basis.x), mid-curve it follows the local tangent — so two segments
+    /// sharing a RoadPoint meet on the same cross-section with no kink.
+    per: Vec<Vec2>,
+    /// per-sample V coordinate for TRIM-sheet strips (GRG UV tiling: per
+    /// segment the V span is snapped to half tiles so dashes stay seamless
+    /// across RoadPoints).
+    v_snap: Vec<f32>,
     v_tile: f64,
     v_dirt: f64,
     dirt: bool,
@@ -290,6 +299,8 @@ fn sweep_profile(curve: &RoadCurve, q: &MeshQuality) -> Sweep {
             gut_y: Vec::new(),
             unpaved: Vec::new(),
             unders: Vec::new(),
+            per: Vec::new(),
+            v_snap: Vec::new(),
             v_tile: 14.0,
             v_dirt: 21.0,
             dirt: false,
@@ -301,6 +312,7 @@ fn sweep_profile(curve: &RoadCurve, q: &MeshQuality) -> Sweep {
     let mut seg_of: Vec<usize> = Vec::new(); // per sample: owning segment
     let mut seg_t: Vec<f64> = Vec::new(); // per sample: t along that segment
     let mut seg_start: Vec<usize> = Vec::new(); // first sample index per segment
+    let mut seg_lens: Vec<f64> = Vec::new(); // per segment: curve length (m)
     for k in 0..seg_count {
         let a = &curve.points[k];
         let b = &curve.points[(k + 1) % n_points];
@@ -308,6 +320,7 @@ fn sweep_profile(curve: &RoadCurve, q: &MeshQuality) -> Sweep {
         let (sp, sc, seg_len) = crate::curve::flatten_cubic(&seg, q.sample_m.max(1.0));
         let base = cum.last().copied().unwrap_or(0.0);
         seg_start.push(pts.len());
+        seg_lens.push(seg_len);
         for (j, p) in sp.iter().enumerate() {
             if j == 0 && !pts.is_empty() {
                 continue; // shared boundary with the previous segment
@@ -350,24 +363,77 @@ fn sweep_profile(curve: &RoadCurve, q: &MeshQuality) -> Sweep {
         let a = &curve.points[k];
         let b = &curve.points[(k + 1) % n_points];
         let t = seg_t[i];
-        let lp = |x: f64, y: f64| x + (y - x) * t;
-        half[i] = lp(
-            a.lanes.max(1) as f64 * a.lane_width + a.median + a.shoulder_l + a.shoulder_r,
-            b.lanes.max(1) as f64 * b.lane_width + b.median + b.shoulder_l + b.shoulder_r,
-        ) / 2.0;
-        m_half[i] = lp(a.median, b.median) / 2.0;
-        sh_l[i] = lp(a.shoulder_l, b.shoulder_l);
-        sh_r[i] = lp(a.shoulder_r, b.shoulder_r);
+        // GRG parity: lane-area widths + underside thickness interpolate with
+        // `ease(offset, smooth_amount)`, smooth_amount = -2 (pins the ends so
+        // the cross-section lands exactly on each RoadPoint's layout);
+        // shoulders / gutters / pathways use the raw offset (GRG lines
+        // 1186-1191 use the un-eased offset for those).
+        let te = crate::curve::ease_neg2(t);
+        let lp = |x: f64, y: f64| x + (y - x) * t;   // raw-offset lerp
+        let lpe = |x: f64, y: f64| x + (y - x) * te; // eased lerp (GRG)
+        let lane_a = a.lanes.max(1) as f64 * a.lane_width;
+        let lane_b = b.lanes.max(1) as f64 * b.lane_width;
+        let med = lpe(a.median, b.median);
+        let shl = lp(a.shoulder_l, b.shoulder_l);
+        let shr = lp(a.shoulder_r, b.shoulder_r);
+        half[i] = (lpe(lane_a, lane_b) + med + shl + shr) / 2.0;
+        m_half[i] = med / 2.0;
+        sh_l[i] = shl;
+        sh_r[i] = shr;
         pw_l[i] = lp(a.pathway_l, b.pathway_l);
         pw_r[i] = lp(a.pathway_r, b.pathway_r);
-        w_lft[i] = (half[i] - sh_l[i] - m_half[i]).max(0.05);
-        w_rgt[i] = (half[i] - sh_r[i] - m_half[i]).max(0.05);
+        w_lft[i] = (half[i] - shl - med / 2.0).max(0.05);
+        w_rgt[i] = (half[i] - shr - med / 2.0).max(0.05);
         elev[i] = lp(a.elev, b.elev);
         gut_w[i] = lp(a.gutter_profile.0, b.gutter_profile.0).max(0.0);
         gut_y[i] = lp(a.gutter_profile.1, b.gutter_profile.1);
         unpaved[i] = a.unpaved() || b.unpaved();
-        let pt = lp(a.underside_thickness, b.underside_thickness);
+        let pt = lpe(a.underside_thickness, b.underside_thickness);
         unders[i] = if pt > 0.0 { pt } else { container_th };
+    }
+
+    // GRG vector alignment (`_normal_for_offset_eased`): at a segment end the
+    // cross-section basis is the RoadPoint's OWN transform (exact bearing),
+    // never a chord approximation — so geometry from both sides of a shared
+    // RoadPoint lines up pixel-perfect and intersections join seamlessly.
+    // Mid-curve the basis follows the local tangent (finite difference of the
+    // baked curve, as in GRG).
+    let mut per = perps(&pts);
+    if n > 0 {
+        let d0 = curve.points[0].dir();
+        per[0] = Vec2::new(-d0.1, d0.0);
+        for i in 0..n {
+            if seg_t[i] >= 1.0 - 1e-9 {
+                let bp = &curve.points[(seg_of[i] + 1) % n_points];
+                let d = bp.dir();
+                per[i] = Vec2::new(-d.1, d.0);
+            }
+        }
+    }
+
+    // GRG UV tiling (road_segment.gd `_build_geo`): per segment the V span is
+    // `target_uv_tiles = seg_len / single_uv_height` with
+    // `single_uv_height = min(lane_width) * 4`, snapped to half-tile steps so
+    // the dash pattern lands on the same phase at the next RoadPoint.
+    let mut v_snap = vec![0.0f32; n];
+    for i in 0..n {
+        let k = seg_of[i];
+        let a = &curve.points[k];
+        let b = &curve.points[(k + 1) % n_points];
+        let uv_h = (4.0 * a.lane_width.min(b.lane_width)).max(0.5);
+        let target = seg_lens[k] / uv_h;
+        let snapped = if target < 0.3 {
+            target // no snapping, UVs slide freely without stretching
+        } else if target < 0.75 {
+            0.5
+        } else if target < 1.25 {
+            1.0
+        } else if target < 1.75 {
+            1.5
+        } else {
+            target.round()
+        };
+        v_snap[i] = (snapped * seg_t[i]) as f32;
     }
 
     Sweep {
@@ -390,6 +456,8 @@ fn sweep_profile(curve: &RoadCurve, q: &MeshQuality) -> Sweep {
         gut_y,
         unpaved,
         unders,
+        per,
+        v_snap,
         v_tile,
         v_dirt,
         dirt,
@@ -419,7 +487,7 @@ fn gutter_underside_parts(sw: &Sweep) -> Vec<MeshPart> {
     if sw.n < 2 {
         return parts;
     }
-    let per = perps(&sw.pts);
+    let per = &sw.per;
 
     /* ---- V-gutter aprons, before the pathways in the cross-section ---- */
     if (0..sw.n).any(|i| gutter_w_at(sw, i) > 0.0) {
@@ -567,6 +635,8 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
         elev,
         gut_w,
         unpaved,
+        per,
+        v_snap,
         v_tile,
         v_dirt,
         dirt,
@@ -595,6 +665,7 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
     #[allow(clippy::too_many_arguments)]
     fn strip_dyn(
         pts: &[Vec2],
+        per: &[Vec2],
         cum: &[f64],
         elev: &[f64],
         off_l: &[f64],
@@ -605,13 +676,13 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
         u_ls: &[f32],
         u_rs: &[f32],
         v_tile: f64,
+        v_override: Option<&[f32]>,
     ) -> MeshPart {
         let mut part = MeshPart::new(color);
         part.tex = tex;
         if pts.len() < 2 {
             return part;
         }
-        let per = perps(pts);
         for (i, p) in pts.iter().enumerate() {
             let rl = per[i] * off_l[i];
             let rr = per[i] * off_r[i];
@@ -626,7 +697,10 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
                 elev[i] as f32 + y_off,
                 (p.y + rr.y) as f32,
             ));
-            let v = (cum[i] / v_tile.max(0.5)) as f32;
+            let v = match v_override {
+                Some(vs) => vs[i],
+                None => (cum[i] / v_tile.max(0.5)) as f32,
+            };
             part.uv.push([u_ls[i], v]);
             part.uv.push([u_rs[i], v]);
         }
@@ -671,7 +745,7 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
             }
         }
         const_u(&mut ul, &mut ur, 0.0, 1.0);
-        parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.01, SIDEWALK_TINT, TEX_SIDEWALK, &ul, &ur, 2.0));
+        parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.01, SIDEWALK_TINT, TEX_SIDEWALK, &ul, &ur, 2.0, None));
     }
 
     /* ---- 5. low-quality mode: flat dynamic strips */
@@ -681,18 +755,18 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
             orr[i] = half[i];
         }
         const_u(&mut ul, &mut ur, 0.0, 1.0);
-        parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.02, rgb(ASPHALT, 1.0), -1, &ul, &ur, v_tile));
+        parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.02, rgb(ASPHALT, 1.0), -1, &ul, &ur, v_tile, None));
         if dirt {
             for i in 0..n {
                 ol[i] = -half[i];
                 orr[i] = lane_span_l(i);
             }
-            parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.025, rgb(ROUGH_FLAT, 1.0), -1, &ul, &ur, v_dirt));
+            parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.025, rgb(ROUGH_FLAT, 1.0), -1, &ul, &ur, v_dirt, None));
             for i in 0..n {
                 ol[i] = lane_span_r(i);
                 orr[i] = half[i];
             }
-            parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.025, rgb(ROUGH_FLAT, 1.0), -1, &ul, &ur, v_dirt));
+            parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.025, rgb(ROUGH_FLAT, 1.0), -1, &ul, &ur, v_dirt, None));
         }
         if m_half.iter().any(|&x| x > 0.0) {
             for i in 0..n {
@@ -700,7 +774,7 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
                 orr[i] = m_half[i];
             }
             let mc = if dirt { rgb(CEMENT_FLAT, 1.0) } else { rgb(CONCRETE, 1.0) };
-            parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.05, mc, -1, &ul, &ur, 4.0));
+            parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.05, mc, -1, &ul, &ur, 4.0, None));
         }
         return parts;
     }
@@ -721,7 +795,7 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
         }
         if dirt {
             const_u(&mut ul, &mut ur, 0.0, 1.0);
-            parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.02, ROUGH_TINT, TEX_ROUGH, &ul, &ur, v_dirt));
+            parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.02, ROUGH_TINT, TEX_ROUGH, &ul, &ur, v_dirt, None));
         } else {
             const_u(
                 &mut ul,
@@ -729,7 +803,7 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
                 COL_SHOULDER as f64 * UV_COL,
                 (COL_SHOULDER + 1) as f64 * UV_COL,
             );
-            parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.02, ROAD_TINT, TEX_ROAD_TRIM, &ul, &ur, v_tile));
+            parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.02, ROAD_TINT, TEX_ROAD_TRIM, &ul, &ur, v_tile, Some(&v_snap)));
         }
     }
 
@@ -764,7 +838,7 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
                     ur[i] = 1.0;
                 }
             }
-            parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.02, MUD_TINT, TEX_MUD, &ul, &ur, v_dirt));
+            parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.02, MUD_TINT, TEX_MUD, &ul, &ur, v_dirt, None));
         }
     } else {
         // helper: emit one side's lane strips for one segment
@@ -789,8 +863,9 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
             left: bool,
             oneway_seg: bool,
             pts: &[Vec2],
+            per: &[Vec2],
             cum: &[f64],
-            v_tile: f64,
+            v_snap: &[f32],
             parts: &mut Vec<MeshPart>,
         ) {
             let nmax = n_a.max(n_b);
@@ -808,8 +883,12 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
                 let wedge = q == nmin && nmax > nmin;
                 for i in seg_range.0..seg_range.1 {
                     let t = seg_t[i];
-                    let lw = lw_a + (lw_b - lw_a) * t;
-                    let wband = w_a + (w_b - w_a) * t;
+                    // GRG eases the cross-section interpolation
+                    // (`ease(offset, -2.0)`) so each RoadPoint's layout is
+                    // pinned exactly at the segment ends.
+                    let te = crate::curve::ease_neg2(t);
+                    let lw = lw_a + (lw_b - lw_a) * te;
+                    let wband = w_a + (w_b - w_a) * te;
                     let (bin, bout) = if wedge {
                         // band inner edge lerps from nmin·lw_a to nmin·lw_b,
                         // outer edge is the full band width (→ zero wedge)
@@ -860,7 +939,8 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
                     ur[j] = ub as f32;
                 }
                 parts.push(strip_dyn(
-                    pts, cum, elev, &ol, &orr, 0.02, ROAD_TINT, TEX_ROAD_TRIM, &ul, &ur, v_tile,
+                    pts, per, cum, elev, &ol, &orr, 0.02, ROAD_TINT, TEX_ROAD_TRIM, &ul, &ur,
+                    14.0, Some(v_snap),
                 ));
             }
         }
@@ -882,9 +962,9 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
             let w_a_r = ra as f64 * a.lane_width + (a.shoulder_l - a.shoulder_r) / 2.0;
             let w_b_r = rb as f64 * b.lane_width + (b.shoulder_l - b.shoulder_r) / 2.0;
             if !a.oneway && !b.oneway {
-                emit_side(range, &seg_t, &m_half, &elev, la, lb, w_a_l, w_b_l, true, false, &pts, &cum, v_tile, &mut parts);
+                emit_side(range, &seg_t, &m_half, &elev, la, lb, w_a_l, w_b_l, true, false, &pts, &per, &cum, &v_snap, &mut parts);
             }
-            emit_side(range, &seg_t, &m_half, &elev, ra, rb, w_a_r, w_b_r, false, a.oneway, &pts, &cum, v_tile, &mut parts);
+            emit_side(range, &seg_t, &m_half, &elev, ra, rb, w_a_r, w_b_r, false, a.oneway, &pts, &per, &cum, &v_snap, &mut parts);
         }
     }
 
@@ -897,19 +977,19 @@ pub fn build_parts(curve: &RoadCurve, q: MeshQuality) -> Vec<MeshPart> {
         }
         const_u(&mut ul, &mut ur, 0.0, 1.0);
         let mtex = if dirt || max_med >= BRT_MEDIAN_M { TEX_CEMENT } else { TEX_MEDIAN };
-        parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.05, CONCRETE_TINT, mtex, &ul, &ur, 4.0));
+        parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.05, CONCRETE_TINT, mtex, &ul, &ur, 4.0, None));
         if max_med >= BRT_MEDIAN_M {
             let tw = TACTILE_W;
             for i in 0..n {
                 ol[i] = -m_half[i];
                 orr[i] = -m_half[i] + tw.min(m_half[i].max(1e-6));
             }
-            parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.06, TACTILE_TINT, TEX_TACTILE, &ul, &ur, 0.8));
+            parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.06, TACTILE_TINT, TEX_TACTILE, &ul, &ur, 0.8, None));
             for i in 0..n {
                 ol[i] = m_half[i] - tw.min(m_half[i].max(1e-6));
                 orr[i] = m_half[i];
             }
-            parts.push(strip_dyn(&pts, &cum, &elev, &ol, &orr, 0.06, TACTILE_TINT, TEX_TACTILE, &ul, &ur, 0.8));
+            parts.push(strip_dyn(&pts, &per, &cum, &elev, &ol, &orr, 0.06, TACTILE_TINT, TEX_TACTILE, &ul, &ur, 0.8, None));
         }
     }
 
