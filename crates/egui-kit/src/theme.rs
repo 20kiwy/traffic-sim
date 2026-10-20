@@ -27,11 +27,12 @@ impl Brightness {
 }
 
 /// The one colour for what is on, chosen or focused. Coral is the default.
+/// (R13: the Blue accent was removed — the app's highlight language is
+/// warm coral/amber only.)
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Accent {
     #[default]
     Coral,
-    Blue,
     Violet,
     Green,
     Amber,
@@ -39,11 +40,10 @@ pub enum Accent {
 }
 
 impl Accent {
-    pub const ALL: [Accent; 6] = [Accent::Coral, Accent::Blue, Accent::Violet, Accent::Green, Accent::Amber, Accent::Pink];
+    pub const ALL: [Accent; 5] = [Accent::Coral, Accent::Violet, Accent::Green, Accent::Amber, Accent::Pink];
     pub fn label(self) -> &'static str {
         match self {
             Accent::Coral => "Coral",
-            Accent::Blue => "Blue",
             Accent::Violet => "Violet",
             Accent::Green => "Green",
             Accent::Amber => "Amber",
@@ -53,7 +53,6 @@ impl Accent {
     fn hex(self) -> u32 {
         match self {
             Accent::Coral => 0xf06a52,
-            Accent::Blue => 0x4f80ff,
             Accent::Violet => 0x9a6aff,
             Accent::Green => 0x3fae6a,
             Accent::Amber => 0xd99922,
@@ -63,7 +62,6 @@ impl Accent {
     fn strong_hex(self) -> u32 {
         match self {
             Accent::Coral => 0xe8573f,
-            Accent::Blue => 0x3d6ef0,
             Accent::Violet => 0x8a58f0,
             Accent::Green => 0x369a5d,
             Accent::Amber => 0xc98a1a,
@@ -73,7 +71,6 @@ impl Accent {
     fn flyout_hex(self) -> u32 {
         match self {
             Accent::Coral => 0xff8a74,
-            Accent::Blue => 0x7d9dff,
             Accent::Violet => 0xb08aff,
             Accent::Green => 0x62c288,
             Accent::Amber => 0xe8b04a,
@@ -147,7 +144,9 @@ impl Tokens {
             row_selected: hx(0x3a2a2c),
             button: hx(0x282d37),
             button_border: hx(0x4a5363),
-            selection: hx(0x4f80ff),
+            // selection follows the accent (was a hardcoded blue 0x4f80ff —
+            // the "blue things" on every highlighted row)
+            selection: hx(a),
             pasteboard: hx(0x0f1116),
             radius: 4,
             font_size: 13.0,

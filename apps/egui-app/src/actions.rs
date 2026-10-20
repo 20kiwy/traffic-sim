@@ -105,6 +105,14 @@ static ACTIONS: &[ActionDef] = &[
     // ---- terrain + lane viz ----
     ActionDef { id: "terrain_toggle", label: "Set terrain (toggle RoadTerrain3DConnector)", location: "Properties › RoadManager", hotkey: None },
     ActionDef { id: "lanes_toggle_visibility", label: "Toggle lane (AI path) visibility", location: "3D toolbar / Roads menu", hotkey: None },
+    // ---- Bridges menu (RoadArchitect bridge kits) ----
+    ActionDef { id: "bridge_style_girder", label: "Deck style: girder (piers)", location: "Bridges menu", hotkey: None },
+    ActionDef { id: "bridge_style_box", label: "Deck style: box girder", location: "Bridges menu", hotkey: None },
+    ActionDef { id: "bridge_style_arch", label: "Deck style: semi-arch", location: "Bridges menu", hotkey: None },
+    ActionDef { id: "bridge_style_suspension", label: "Deck style: suspension", location: "Bridges menu", hotkey: None },
+    ActionDef { id: "toggle_tunnel", label: "Toggle tunnel vault on the selected road", location: "Bridges menu", hotkey: None },
+    ActionDef { id: "toggle_guardrail", label: "Toggle W-beam guardrails on the selected road", location: "Bridges menu", hotkey: None },
+    ActionDef { id: "toggle_cable_barrier", label: "Toggle median cable barrier on the selected road", location: "Bridges menu", hotkey: None },
 ];
 
 /// Execute an action by id. Returns a human-readable diff of what changed so
@@ -333,6 +341,54 @@ pub fn perform(app: &mut RoadkitApp, id: &str) -> Result<String, String> {
             app.render.dirty = true;
             let on = app.render.show_lanes;
             app.status = if on { "lanes visible" } else { "lanes hidden" }.to_string();
+        }
+        /* ---------------- Bridges menu (RA bridge kits) ---------------- */
+        "bridge_style_girder" | "bridge_style_box" | "bridge_style_arch" | "bridge_style_suspension" => {
+            let style = match id {
+                "bridge_style_box" => roads::model::BridgeStyle::BoxGirder,
+                "bridge_style_arch" => roads::model::BridgeStyle::Arch,
+                "bridge_style_suspension" => roads::model::BridgeStyle::Suspension,
+                _ => roads::model::BridgeStyle::Girder,
+            };
+            let ci = app
+                .sel_container
+                .or(app.sel.map(|(ci, _)| ci))
+                .ok_or("select a road first — the bridge kits apply to the selected RoadContainer")?;
+            let name = {
+                let mut sc = app.scene.borrow_mut();
+                sc.dirty = true;
+                let c = sc.curves.get_mut(ci).ok_or("selected road no longer exists")?;
+                c.bridge_style = style;
+                c.name.clone()
+            };
+            app.render.dirty = true;
+            app.status = format!("{name}: deck style → {style:?}");
+            out = format!("curve {ci} bridge_style = {style:?}");
+        }
+        "toggle_tunnel" | "toggle_guardrail" | "toggle_cable_barrier" => {
+            let ci = app
+                .sel_container
+                .or(app.sel.map(|(ci, _)| ci))
+                .ok_or("select a road first — bridges/edge safety apply to the selected RoadContainer")?;
+            let (name, val) = {
+                let mut sc = app.scene.borrow_mut();
+                sc.dirty = true;
+                let c = sc.curves.get_mut(ci).ok_or("selected road no longer exists")?;
+                match id {
+                    "toggle_tunnel" => c.tunnel = !c.tunnel,
+                    "toggle_guardrail" => c.guardrail = !c.guardrail,
+                    _ => c.cable_barrier = !c.cable_barrier,
+                }
+                let val = match id {
+                    "toggle_tunnel" => c.tunnel,
+                    "toggle_guardrail" => c.guardrail,
+                    _ => c.cable_barrier,
+                };
+                (c.name.clone(), val)
+            };
+            app.render.dirty = true;
+            app.status = format!("{name}: {} → {val}", id.trim_start_matches("toggle_"));
+            out = format!("curve {ci} {} = {val}", id.trim_start_matches("toggle_"));
         }
         _ => return Err(format!("unknown action id '{id}' — call list_actions")),
     }

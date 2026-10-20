@@ -8,6 +8,7 @@ pub mod actions;
 pub mod bridge;
 pub mod chrome;
 pub mod history;
+pub mod minimap;
 pub mod nodes_schema;
 pub mod panels;
 pub mod planview;

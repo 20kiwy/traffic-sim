@@ -4,13 +4,20 @@ window facade into RKTX raw files (magic 'RKTX' + u16 w + u16 h + rgba8).
 
 Slots appended after the 9 standard ones (see roadkit/src/textures.rs):
   ra_asphalt, ra_concrete, ra_galv, ra_wbeam, ra_railing, ra_brick,
-  ra_cobble, windows
+  ra_cobble, windows, ra_concrete2, ra_concrete3, ra_dirt
+
+R13: the RA source PNGs are authored for Unity's tone pipeline and read far
+too dark on our CPU raster (GSDConcrete1/2/3 are nearly black, the W-beam
+band almost disappears). Every texture now goes through an auto-level:
+2-98 percentile stretch -> gamma match to a per-material mean luminance ->
+saturation trim that kills the asphalt's purple cast.
 Run from the repo root:  python3 assets/textures_src/gen_ra_textures.py
 """
+import math
 import struct
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 ROOT = Path(__file__).resolve().parents[2]
 RA = ROOT / "assets" / "ra_textures"
@@ -31,6 +38,54 @@ FILES = {
     "ra_concrete3": "GSDConcrete3_Diffuse.png",
     "ra_dirt": "GSDDirtRoad_Diffuse.png",
 }
+
+# name -> (target mean luminance 0..1, saturation 0..1)
+LOOK = {
+    "ra_asphalt": (0.30, 0.45),
+    "ra_concrete": (0.58, 0.55),
+    "ra_concrete2": (0.54, 0.55),
+    "ra_concrete3": (0.52, 0.6),
+    "ra_galv": (0.60, 1.0),
+    "ra_wbeam": (0.42, 0.88),
+    "ra_railing": (0.52, 0.9),
+    "ra_brick": (0.42, 1.0),
+    "ra_cobble": (0.46, 1.0),
+    "ra_dirt": (0.40, 1.0),
+}
+
+
+def autolevel(im: Image.Image, target_mean: float, saturation: float) -> Image.Image:
+    """Percentile stretch + gamma mean-match + desaturation (RGB)."""
+    rgb = im.convert("RGB")
+    hist = rgb.convert("L").histogram()
+    total = sum(hist) or 1
+
+    def pct(p: float) -> int:
+        cum = 0
+        for i, c in enumerate(hist):
+            cum += c
+            if cum >= total * p:
+                return i
+        return 255
+
+    lo, hi = pct(0.02), pct(0.98)
+    if hi - lo < 8:
+        hi = min(255, lo + 8)
+    lut = [int(max(0.0, min(1.0, (v - lo) / (hi - lo))) * 255) for v in range(256)]
+    rgb = rgb.point(lut * 3)
+
+    hist = rgb.convert("L").histogram()
+    mean = sum(i * c for i, c in enumerate(hist)) / (sum(hist) or 1) / 255.0
+    mean = min(max(mean, 0.01), 0.99)
+    target = min(max(target_mean, 0.01), 0.99)
+    gamma = min(max(math.log(target) / math.log(mean), 0.35), 3.2)
+    glut = [round(255.0 * ((v / 255.0) ** gamma)) for v in range(256)]
+    rgb = rgb.point(glut * 3)
+
+    if saturation < 1.0:
+        gray = ImageOps.grayscale(rgb).convert("RGB")
+        rgb = Image.blend(rgb, gray, 1.0 - saturation)
+    return rgb
 
 
 def save_rktx(name: str, im: Image.Image) -> None:
@@ -91,6 +146,8 @@ def main() -> None:
             print(f"SKIP {name}: {p.name} missing")
             continue
         im = Image.open(p)
+        target, sat = LOOK.get(name, (0.5, 1.0))
+        im = autolevel(im, target, sat)
         # keep sizes modest for wasm embedding (1024 -> keep asphalt, rest 512)
         if name != "ra_asphalt" and max(im.size) > 512:
             im = im.resize((512, int(im.height * 512 / im.width)))

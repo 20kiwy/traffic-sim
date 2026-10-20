@@ -17,10 +17,97 @@ pub struct Texture {
     pub h: usize,
     /// rgba8
     pub data: Vec<u8>,
+    /// box-filtered mip pyramid (level 1.., each half the previous size).
+    /// Built once at load; the raster picks a level per triangle so distant
+    /// surfaces sample averaged texels instead of shimming noise.
+    pub mips: Vec<Mip>,
+}
+
+/// One downsampled level (level = 1 is half resolution, 2 is quarter…).
+#[derive(Clone, Debug)]
+pub struct Mip {
+    pub w: usize,
+    pub h: usize,
+    pub data: Vec<u8>,
 }
 
 impl Texture {
-    /// Parse an in-memory RKTX payload (magic 'RKTX' + u16 w + u16 h + rgba8).
+    /// Build the mip pyramid (2×2 box filter per step). 1×1 textures get none.
+    fn build_mips(mut self) -> Self {
+        let mut w = self.w;
+        let mut h = self.h;
+        let mut data = self.data.clone();
+        while w.min(h) > 1 {
+            let (nw, nh) = (w / 2, h / 2);
+            let mut out = vec![0u8; nw * nh * 4];
+            for y in 0..nh {
+                for x in 0..nw {
+                    let (x2, y2) = (x * 2, y * 2);
+                    for c in 0..4 {
+                        let o = |xx: usize, yy: usize| ((yy * w + xx) * 4 + c) as usize;
+                        let a = data[o(x2, y2)] as u32;
+                        let b = data[o(x2 + 1, y2)] as u32;
+                        let e = data[o(x2, y2 + 1)] as u32;
+                        let d = data[o(x2 + 1, y2 + 1)] as u32;
+                        out[(y * nw + x) * 4 + c] = ((a + b + e + d) / 4) as u8;
+                    }
+                }
+            }
+            self.mips.push(Mip { w: nw, h: nh, data: out.clone() });
+            data = out;
+            w = nw;
+            h = nh;
+        }
+        self
+    }
+
+    /// Sample mip `level` (0 = the base texture), bilinear + wrap.
+    pub fn sample_lod(&self, u: f32, v: f32, level: usize) -> [f32; 4] {
+        if level > 0 {
+            if let Some(m) = self.mips.get(level - 1) {
+                return sample_buf(m.w, m.h, &m.data, u, v);
+            }
+        }
+        sample_buf(self.w, self.h, &self.data, u, v)
+    }
+}
+
+/// Bilinear RGBA sample from a raw pixel buffer with wrapped UVs (0..1, repeat).
+fn sample_buf(w: usize, h: usize, data: &[u8], u: f32, v: f32) -> [f32; 4] {
+    let w = w.max(1);
+    let h = h.max(1);
+    let x = u * w as f32 - 0.5;
+    let y = v * h as f32 - 0.5;
+    let x0 = x.floor();
+    let y0 = y.floor();
+    let tx = x - x0;
+    let ty = y - y0;
+    let wrap = |i: i64, n: usize| ((i % n as i64) + n as i64) as usize % n;
+    let (ix0, iy0) = (wrap(x0 as i64, w), wrap(y0 as i64, h));
+    let (ix1, iy1) = (wrap(x0 as i64 + 1, w), wrap(y0 as i64 + 1, h));
+    let at = |ix: usize, iy: usize| -> [f32; 4] {
+        let o = (iy * w + ix) * 4;
+        [
+            data[o] as f32 / 255.0,
+            data[o + 1] as f32 / 255.0,
+            data[o + 2] as f32 / 255.0,
+            data[o + 3] as f32 / 255.0,
+        ]
+    };
+    let c00 = at(ix0, iy0);
+    let c10 = at(ix1, iy0);
+    let c01 = at(ix0, iy1);
+    let c11 = at(ix1, iy1);
+    let mut out = [0.0f32; 4];
+    for k in 0..4 {
+        let a = c00[k] * (1.0 - tx) + c10[k] * tx;
+        let b = c01[k] * (1.0 - tx) + c11[k] * tx;
+        out[k] = a * (1.0 - ty) + b * ty;
+    }
+    out
+}
+
+impl Texture {
     pub fn from_rktx_bytes(bytes: &[u8]) -> std::io::Result<Self> {
         if bytes.len() < 8 || &bytes[0..4] != b"RKTX" {
             return Err(std::io::Error::new(
@@ -37,49 +124,19 @@ impl Texture {
                 format!("truncated RKTX (need {need} bytes)"),
             ));
         }
-        Ok(Self { w, h, data: bytes[8..8 + need].to_vec() })
+        Ok(Self { w, h, data: bytes[8..8 + need].to_vec(), mips: Vec::new() })
     }
 
     pub fn load_rktx(path: &Path) -> std::io::Result<Self> {
         let bytes = std::fs::read(path)?;
-        Self::from_rktx_bytes(&bytes).map_err(|e| {
+        Self::from_rktx_bytes(&bytes).map(|t| t.build_mips()).map_err(|e| {
             std::io::Error::new(e.kind(), format!("{}: {}", path.display(), e))
         })
     }
 
     /// Bilinear RGBA sample with wrapped UVs (0..1, repeat).
     pub fn sample(&self, u: f32, v: f32) -> [f32; 4] {
-        let w = self.w.max(1);
-        let h = self.h.max(1);
-        let x = u * w as f32 - 0.5;
-        let y = v * h as f32 - 0.5;
-        let x0 = x.floor();
-        let y0 = y.floor();
-        let tx = x - x0;
-        let ty = y - y0;
-        let wrap = |i: i64, n: usize| ((i % n as i64) + n as i64) as usize % n;
-        let (ix0, iy0) = (wrap(x0 as i64, w), wrap(y0 as i64, h));
-        let (ix1, iy1) = (wrap(x0 as i64 + 1, w), wrap(y0 as i64 + 1, h));
-        let at = |ix: usize, iy: usize| -> [f32; 4] {
-            let o = (iy * w + ix) * 4;
-            [
-                self.data[o] as f32 / 255.0,
-                self.data[o + 1] as f32 / 255.0,
-                self.data[o + 2] as f32 / 255.0,
-                self.data[o + 3] as f32 / 255.0,
-            ]
-        };
-        let c00 = at(ix0, iy0);
-        let c10 = at(ix1, iy0);
-        let c01 = at(ix0, iy1);
-        let c11 = at(ix1, iy1);
-        let mut out = [0.0f32; 4];
-        for k in 0..4 {
-            let a = c00[k] * (1.0 - tx) + c10[k] * tx;
-            let b = c01[k] * (1.0 - tx) + c11[k] * tx;
-            out[k] = a * (1.0 - ty) + b * ty;
-        }
-        out
+        sample_buf(self.w, self.h, &self.data, u, v)
     }
 }
 
@@ -136,7 +193,7 @@ impl TextureLibrary {
                     eprintln!("[roadkit] texture {name}: {e}");
                     lib.index.insert(name.to_string(), lib.entries.len());
                     // 1x1 fallback so indices stay valid
-                    lib.entries.push(Texture { w: 1, h: 1, data: vec![128, 128, 128, 255] });
+                    lib.entries.push(Texture { w: 1, h: 1, data: vec![128, 128, 128, 255], mips: Vec::new() });
                 }
             }
         }
@@ -190,10 +247,10 @@ impl TextureLibrary {
         for (name, bytes) in NAMES.iter().zip(BYTES.iter()) {
             lib.index.insert(name.to_string(), lib.entries.len());
             match Texture::from_rktx_bytes(bytes) {
-                Ok(t) => lib.entries.push(t),
+                Ok(t) => lib.entries.push(t.build_mips()),
                 Err(_) => lib
                     .entries
-                    .push(Texture { w: 1, h: 1, data: vec![128, 128, 128, 255] }),
+                    .push(Texture { w: 1, h: 1, data: vec![128, 128, 128, 255], mips: Vec::new() }),
             }
         }
         lib

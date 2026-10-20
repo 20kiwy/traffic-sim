@@ -1,24 +1,23 @@
 //! The Terrazon-style chrome: app bar (32) · control bar (34, tools live
 //! here now) · central doc tabs. Status/hint bars live in statusbar.rs.
-//! (The old 64 px left tool rail is removed — panels read cleaner.)
 //!
-//! LAYOUT BUG FIXED: the panel Ui is `top_down`; two bare `ui.with_layout`
-//! calls stacked VERTICALLY — the right-aligned controls landed on an
-//! invisible clipped second row (never seen) AND the overflow pushed every
-//! following panel down, leaving unpainted black bands across the app.
-//! Everything now lives inside ONE `ui.horizontal` row.
+//! R13 de-clutter rework: FOUR menus only (Scene / Roads / Bridges / Help),
+//! no look pickers (one theme, one accent), no Props menu (props dress the
+//! roads through scenes + the Assets panel on the icon column). The app is
+//! ROADS + BRIDGES only — buildings stay parked in the code as a backup.
 
 use crate::actions;
-use crate::state::{DockTab, RoadkitApp, Tab, Tool};
+use crate::state::{RoadkitApp, Tab, Tool};
 use egui::RichText;
 use egui_kit::IconName;
+use roads::model::BridgeStyle;
 
 pub const APP_BAR_H: f32 = 32.0;
 pub const CONTROL_H: f32 = 34.0;
 pub const DOC_TAB_H: f32 = 35.0;
 
 /* ------------------------------------------------------------------ */
-/* App bar — brand, menus, look pickers                                */
+/* App bar — brand + the four menus                                    */
 /* ------------------------------------------------------------------ */
 
 pub fn app_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
@@ -31,16 +30,15 @@ pub fn app_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
                 .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
         )
         .show(ctx, |ui| {
-            // ONE row: menus left, look pickers right (both vertically centered)
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
-                ui.label(RichText::new("◆ RoadKit Godot").strong().size(12.0).color(t.text_strong));
+                ui.label(RichText::new("◆ RoadKit").strong().size(12.0).color(t.text_strong));
                 ui.separator();
                 ui.spacing_mut().item_spacing.x = 2.0;
 
-                ui.menu_button(RichText::new("Script").size(12.0), |ui| {
-                    if ui.button("▶ Run script  (F5)").clicked() {
-                        let _ = actions::perform(app, "run_script");
+                ui.menu_button(RichText::new("Scene").size(12.0), |ui| {
+                    if ui.button("▶ Run  (F5)").on_hover_text("Rebuild the loaded scene — or run the .gd script when no city is loaded").clicked() {
+                        let _ = actions::perform(app, "rebuild_or_run");
                         ui.close_menu();
                     }
                     if ui.button("Reset scene").clicked() {
@@ -67,52 +65,8 @@ pub fn app_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
                         }
                     }
                 });
-                ui.menu_button(RichText::new("View").size(12.0), |ui| {
-                    for tab in [Tab::Scene3d, Tab::Plan] {
-                        let label = match tab {
-                            Tab::Scene3d => "3D Scene",
-                            Tab::Plan => "2D Plan",
-                        };
-                        if ui.selectable_label(app.tab == tab, label).clicked() {
-                            app.tab = tab;
-                            ui.close_menu();
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Fit scene  (F)").clicked() {
-                        let _ = actions::perform(app, "fit_scene");
-                        ui.close_menu();
-                    }
-                    if ui.button("Reset 3D camera  (R)").clicked() {
-                        let _ = actions::perform(app, "reset_camera");
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    ui.label(RichText::new("panels").size(10.0).color(t.text_dim));
-                    for tab in DockTab::ALL {
-                        let mut on = app.panels.is_open(tab);
-                        if ui.checkbox(&mut on, tab.label()).changed() {
-                            app.panels.set_open(tab, on);
-                            if on {
-                                app.dock_tab = tab;
-                            }
-                        }
-                    }
-                    if ui.checkbox(&mut app.dock_collapsed, "Collapse dock").changed() {
-                        // keep as-is; the icon column shows instead
-                    }
-                });
-                ui.menu_button(RichText::new("Props").size(12.0), |ui| {
-                    if ui.button("▶ Join GLB props like Godot").clicked() {
-                        let _ = actions::perform(app, "join_props");
-                        ui.close_menu();
-                    }
-                    if ui.button("Clear all props").clicked() {
-                        let _ = actions::perform(app, "clear_props");
-                        ui.close_menu();
-                    }
-                });
                 roads_menu(app, ui);
+                bridges_menu(app, ui);
                 ui.menu_button(RichText::new("Help").size(12.0), |ui| {
                     if ui.button("Road node structure").on_hover_text("What is the RoadManager, a RoadContainer, a RoadPoint, a RoadLane?").clicked() {
                         app.show_nodes_help = true;
@@ -122,50 +76,28 @@ pub fn app_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
                         app.show_api = true;
                         ui.close_menu();
                     }
-                    if ui.button("About RoadKit Godot").clicked() {
+                    if ui.button("About RoadKit").clicked() {
                         app.show_about = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("List all UI actions (MCP)").clicked() {
-                        let n = actions::all().len();
-                        app.scene.borrow_mut().log(format!(
-                            "[mcp] {n} registered UI actions — run `roadkit-godot --mcp` and call list_actions"
-                        ));
                         ui.close_menu();
                     }
                 });
 
-                // right side: brightness + accent pickers
+                // right side: the 3D / 2D doc switch (no look pickers —
+                // one theme, one accent)
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    for a in egui_kit::Accent::ALL {
-                        let sel = app.accent == a;
-                        let (r, resp) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
-                        let fill = if sel { accent_hex(a, true) } else { accent_hex(a, false) };
-                        ui.painter().rect_filled(r, 7.0, fill);
-                        if sel {
-                            ui.painter().rect_stroke(r.shrink(1.5), 6.0, egui::Stroke::new(1.2, t.text_strong));
-                        }
-                        if resp.clicked() {
-                            app.accent = a;
-                            egui_kit::install(ctx, app.brightness, app.accent);
-                        }
-                        resp.on_hover_text(format!("{} accent", a.label()));
-                    }
-                    ui.separator();
-                    for b in egui_kit::Brightness::ALL {
-                        let sel = app.brightness == b;
+                    for (tab, label) in [(Tab::Plan, "2D"), (Tab::Scene3d, "3D")] {
+                        let sel = app.tab == tab;
                         if ui
                             .add(
-                                egui::Button::new(RichText::new(b.label()).size(10.5).color(if sel { t.text_strong } else { t.text_dim }))
+                                egui::Button::new(RichText::new(label).size(11.5).color(if sel { t.text_strong } else { t.text_dim }))
                                     .fill(if sel { t.tool_active } else { egui::Color32::TRANSPARENT })
-                                    .min_size(egui::vec2(0.0, 20.0)),
+                                    .min_size(egui::vec2(30.0, 22.0)),
                             )
+                            .on_hover_text(if tab == Tab::Plan { "2D plan editor" } else { "3D scene render — the 2D plan rides on top as a minimap" })
                             .clicked()
                         {
-                            app.brightness = b;
-                            egui_kit::install(ctx, app.brightness, app.accent);
+                            app.tab = tab;
                         }
                     }
                 });
@@ -174,7 +106,7 @@ pub fn app_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Roads menu — the GRG plugin's app-menu clone (plugin.gd "Roads")    */
+/* Roads menu — the roads-only core of the GRG plugin's app menu       */
 /* ------------------------------------------------------------------ */
 
 fn roads_item(app: &mut RoadkitApp, ui: &mut egui::Ui, label: &str, tip: &str, action: &str) {
@@ -189,34 +121,9 @@ fn roads_menu(app: &mut RoadkitApp, ui: &mut egui::Ui) {
         roads_item(app, ui, "Refresh roads", "Re-generate geometry and resolve warnings", "roads_refresh");
         roads_item(app, ui, "Select container", "Select this RoadPoint's parent RoadContainer", "roads_select_container");
         ui.separator();
-        roads_item(app, ui, "RoadContainer", "Adds a RoadContainer child to RoadManager", "roads_add_container");
-        roads_item(app, ui, "RoadPoint", "Adds a new RoadPoint", "roads_add_point");
-        roads_item(app, ui, "RoadLane (AI path)", "Adds a RoadLane which can be used for AI paths", "roads_add_lane");
-        roads_item(app, ui, "RoadLaneAgent (AI)", "Adds a RoadLaneAgent to follow RoadLane paths", "roads_add_agent");
-        roads_item(app, ui, "RoadTerrain3DConnector", "Adds node to flatten Terrain3D surface based on roads", "roads_add_terrain_connector");
-        ui.separator();
+        roads_item(app, ui, "Add RoadPoint", "Adds a new RoadPoint", "roads_add_point");
         roads_item(app, ui, "2x2 road", "Adds a segment of road with 2 lanes each way", "roads_2x2");
-        ui.menu_button("RoadContainer presets →", |ui| {
-            if ui.button("Change folder").on_hover_text("Pick a another folder containing tscn's with RoadContainer as the root").clicked() {
-                app.scene.borrow_mut().log(
-                    "[presets] folder picker stub — RoadKit ships the full GRG preset set bundled in assets/glb",
-                );
-                ui.close_menu();
-            }
-            if ui.button("Reset to default").on_hover_text("Reset to the default plugin intersection folder").clicked() {
-                app.scene.borrow_mut().log(
-                    "[presets] preset folder reset to the bundled set (10 custom containers)",
-                );
-                ui.close_menu();
-            }
-            if ui.button("Reload folder").on_hover_text("Refresh the current directory of tscn's").clicked() {
-                let n = roads::prefab::PREFABS.len();
-                app.scene
-                    .borrow_mut()
-                    .log(format!("[presets] reloaded {n} preset containers from the bundled folder"));
-                ui.close_menu();
-            }
-            ui.separator();
+        ui.menu_button("Road presets →", |ui| {
             // the 10 GRG custom-container presets, alphabetically like the plugin
             for (id, tip) in [
                 ("3way_1x1", "T-junction, single carriageway"),
@@ -241,32 +148,61 @@ fn roads_menu(app: &mut RoadkitApp, ui: &mut egui::Ui) {
             }
         });
         ui.separator();
-        roads_item(app, ui, "Export RoadContainer", "Export current RoadContainer and children to a gLTF/GLB file", "roads_export");
-        roads_item(app, ui, "Make RoadLanes Editable", "Expose RoadLanes nodes in editor for manual editing", "roads_make_lanes_editable");
-        ui.separator();
-        roads_item(app, ui, "Report issue", "Report an issue with the plugin on GitHub", "roads_report_issue");
-        roads_item(app, ui, "Share feedback", "Share feedback about the plugin", "roads_share_feedback");
+        roads_item(app, ui, "Fit scene  (F)", "Fit the whole scene in view", "fit_scene");
+        roads_item(app, ui, "Reset camera  (R)", "Reset the 3D orbit camera", "reset_camera");
     });
 }
 
-fn accent_hex(a: egui_kit::Accent, strong: bool) -> egui::Color32 {
-    use egui_kit::Accent::*;
-    let hex = match (a, strong) {
-        (Coral, false) => 0xf06a52,
-        (Coral, true) => 0xe8573f,
-        (Blue, false) => 0x5b96ff,
-        (Blue, true) => 0x2f74f0,
-        (Violet, false) => 0xa98bff,
-        (Violet, true) => 0x7c55f0,
-        (Green, false) => 0x3fcf8e,
-        (Green, true) => 0x1f9d63,
-        (Amber, false) => 0xf5b544,
-        (Amber, true) => 0xc47f0e,
-        (Pink, false) => 0xf36aa3,
-        (Pink, true) => 0xdb3f7c,
-        _ => 0xf06a52,
-    };
-    egui::Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+/* ------------------------------------------------------------------ */
+/* Bridges menu — the RoadArchitect bridge kit, one place: deck style  */
+/* (girder / box girder / arch / suspension) + tunnel + edge safety    */
+/* (guardrails / cable barrier), applied to the selected RoadContainer */
+/* ------------------------------------------------------------------ */
+
+fn bridges_menu(app: &mut RoadkitApp, ui: &mut egui::Ui) {
+    let t = egui_kit::tokens(ui.ctx());
+    ui.menu_button(RichText::new("Bridges").size(12.0), |ui| {
+        let sel = app.sel_container.or(app.sel.map(|(c, _)| c));
+        let (style, tunnel, guardrail, cable) = match sel {
+            Some(ci) => {
+                let sc = app.scene.borrow();
+                sc.curves.get(ci).map(|c| (c.bridge_style, c.tunnel, c.guardrail, c.cable_barrier)).unwrap_or((BridgeStyle::Girder, false, false, false))
+            }
+            None => (BridgeStyle::Girder, false, false, false),
+        };
+        ui.label(
+            RichText::new(match sel {
+                Some(ci) => format!("selected: {}", app.scene.borrow().curves.get(ci).map(|c| c.name.clone()).unwrap_or_default()),
+                None => "no road selected — pick one in Layers or the 2D plan".to_string(),
+            })
+            .size(10.0)
+            .color(t.text_dim),
+        );
+        ui.label(RichText::new("deck style").size(10.0).color(t.text_dim));
+        for (label, action, st) in [
+            ("Girder deck", "bridge_style_girder", BridgeStyle::Girder),
+            ("Box girder", "bridge_style_box", BridgeStyle::BoxGirder),
+            ("Semi-arch", "bridge_style_arch", BridgeStyle::Arch),
+            ("Suspension", "bridge_style_suspension", BridgeStyle::Suspension),
+        ] {
+            if ui.selectable_label(style == st, label).on_hover_text(format!("RoadArchitect {label} kit — piers/deep box/rib+s spandrels/towers+cables")).clicked() {
+                let _ = actions::perform(app, action);
+                ui.close_menu();
+            }
+        }
+        ui.separator();
+        bridge_toggle(app, ui, "Tunnel (half-cylinder vault)", tunnel, "toggle_tunnel");
+        bridge_toggle(app, ui, "Guardrails (W-beam)", guardrail, "toggle_guardrail");
+        bridge_toggle(app, ui, "Cable barrier (median)", cable, "toggle_cable_barrier");
+    });
+}
+
+fn bridge_toggle(app: &mut RoadkitApp, ui: &mut egui::Ui, label: &str, on: bool, action: &str) {
+    let mut v = on;
+    if ui.checkbox(&mut v, label).on_hover_text("Toggles the flag on the selected RoadContainer and rebuilds").clicked() {
+        let _ = actions::perform(app, action);
+        ui.close_menu();
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -334,15 +270,7 @@ pub fn control_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
                     app.render.dirty = true;
                 }
 
-                let junctions = app.scene.borrow().junctions.len();
-                ui.separator();
-                ui.label(
-                    RichText::new(format!(" intersections {junctions}"))
-                        .size(11.0)
-                        .color(t.text_dim),
-                );
-
-                // right side: doc tab switch, camera buttons, Run
+                // right side: camera buttons + primary Run
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     // primary Run button
@@ -363,22 +291,6 @@ pub fn control_bar(app: &mut RoadkitApp, ctx: &egui::Context) {
                     }
                     if egui_kit::btn(ui, "Cam", false).on_hover_text("Reset the 3D orbit camera (R)").clicked() {
                         let _ = actions::perform(app, "reset_camera");
-                    }
-                    ui.separator();
-                    // doc tab switch (3D/2D)
-                    for (tab, label) in [(Tab::Scene3d, "3D"), (Tab::Plan, "2D")] {
-                        let sel = app.tab == tab;
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(label).size(11.5).color(if sel { t.text_strong } else { t.text_dim }))
-                                    .fill(if sel { t.tool_active } else { egui::Color32::TRANSPARENT })
-                                    .min_size(egui::vec2(30.0, 22.0)),
-                            )
-                            .on_hover_text(if tab == Tab::Plan { "2D plan editor" } else { "3D scene render" })
-                            .clicked()
-                        {
-                            app.tab = tab;
-                        }
                     }
                 });
             });
@@ -437,7 +349,7 @@ fn doc_tabs(app: &mut RoadkitApp, ui: &mut egui::Ui) {
     let t = egui_kit::tokens(ui.ctx());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 1.0;
-        for (tab, label) in [(Tab::Plan, "2D Plan — snapping & junctions"), (Tab::Scene3d, "3D Scene — procedural roads · GLB props")] {
+        for (tab, label) in [(Tab::Plan, "2D Plan — snapping & junctions"), (Tab::Scene3d, "3D Scene — roads · bridges · GLB dressing")] {
             let sel = app.tab == tab;
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(210.0, DOC_TAB_H - 1.0), egui::Sense::click());
             if sel {

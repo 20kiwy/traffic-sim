@@ -376,10 +376,12 @@ fn raster_tri(
                 let mut cg = (b0 * p0.4[1] * p0.3 + b1 * p1.4[1] * p1.3 + b2 * p2.4[1] * p2.3) / iw * shade;
                 let mut cb = (b0 * p0.4[2] * p0.3 + b1 * p1.4[2] * p1.3 + b2 * p2.4[2] * p2.3) / iw * shade;
                 if let Some(t) = tex {
-                    // perspective-correct UV sampling (bilinear, wrap)
+                    // perspective-correct UV sampling; the mip level is chosen
+                    // PER TRIANGLE from the texel-to-pixel footprint so distant
+                    // surfaces read averaged texels (no shimmer, no dark mush)
                     let uu = (b0 * p0.5[0] * p0.3 + b1 * p1.5[0] * p1.3 + b2 * p2.5[0] * p2.3) / iw;
                     let vv = (b0 * p0.5[1] * p0.3 + b1 * p1.5[1] * p1.3 + b2 * p2.5[1] * p2.3) / iw;
-                    let s = t.sample(uu, vv);
+                    let s = sample_tri_lod(t, &p0, &p1, &p2, area, uu, vv);
                     cr *= s[0];
                     cg *= s[1];
                     cb *= s[2];
@@ -404,6 +406,35 @@ fn raster_tri(
 /// Perspective-correct edge helper (signed edge function).
 fn edge_fn(ax: f32, ay: f32, bx: f32, by: f32, px: f64, py: f64) -> f32 {
     ((bx - ax) as f64 * (py - ay as f64) - (by - ay) as f64 * (px - ax as f64)) as f32
+}
+
+/// Per-triangle mip selection: compare the triangle's UV footprint (in
+/// texels) against its screen area (in pixels); `log2` of that ratio is
+/// the mip level where one texel ≈ one pixel. Clamped to the chain, so
+/// hyper-close surfaces keep full detail and far ones blur smoothly.
+fn sample_tri_lod(
+    t: &crate::textures::Texture,
+    p0: &ScrV,
+    p1: &ScrV,
+    p2: &ScrV,
+    screen_area2: f32,
+    uu: f32,
+    vv: f32,
+) -> [f32; 4] {
+    let du1 = p1.5[0] - p0.5[0];
+    let dv1 = p1.5[1] - p0.5[1];
+    let du2 = p2.5[0] - p0.5[0];
+    let dv2 = p2.5[1] - p0.5[1];
+    let uv_area2 = (du1 * dv2 - du2 * dv1).abs();
+    let texel_area = uv_area2 * 0.5 * (t.w.max(1) * t.h.max(1)) as f32;
+    let screen_area = (screen_area2.abs() * 0.5).max(0.25);
+    let texels_per_px = (texel_area / screen_area).sqrt();
+    let level = if texels_per_px <= 1.0 {
+        0
+    } else {
+        texels_per_px.log2().round().clamp(0.0, t.mips.len() as f32) as usize
+    };
+    t.sample_lod(uu, vv, level)
 }
 
 /// Box-filter downsample an RGBA8 buffer by an integer factor (Quality

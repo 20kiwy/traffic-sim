@@ -4,3 +4,4 @@ web-preview/egui_app.js
 web-preview/egui_app_bg.wasm
 web-preview/egui_app.d.ts
 web-preview/egui_app_bg.wasm.d.ts
+dsm_*.png

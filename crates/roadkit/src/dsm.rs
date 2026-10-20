@@ -1383,7 +1383,15 @@ pub fn dsm_building_sites() -> Vec<Site> {
     ]
 }
 
+/// BACKUP — procedural city blocks are PARKED (R13: the app UI is roads +
+/// bridges only; buildings are not implemented for now, the generator stays
+/// here so the feature can be re-enabled by flipping this flag).
+pub const BUILDINGS_ENABLED: bool = false;
+
 /// Procedural city blocks (world-space mesh parts) for the JICA sites.
 pub fn dsm_buildings(curves: &[RoadCurve]) -> Vec<roads::mesh3d::MeshPart> {
+    if !BUILDINGS_ENABLED {
+        return Vec::new();
+    }
     blocks_for_sites(curves, &dsm_building_sites(), 0xD5_1A57)
 }

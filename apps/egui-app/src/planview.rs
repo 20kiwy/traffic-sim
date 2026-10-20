@@ -62,6 +62,30 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 Stroke::new(1.0, axis_col),
             );
 
+            // ---------- hovered grid cell: the cursor's surface highlight ----------
+            // the cell under the pointer lights up (same metre ladder as the
+            // lines above) — grid snapping becomes readable, in 2D exactly
+            // like the 3D ground grid's cell highlight
+            if let Some(hp) = response.hover_pos().filter(|_| !response.dragged()) {
+                let wp = app.screen_to_plan(hp, &rect);
+                let stepf = step as f64;
+                let (cx, cz) = ((wp.x / stepf).floor() * stepf, (wp.y / stepf).floor() * stepf);
+                let quad = [
+                    app.plan_to_screen(Vec2::new(cx, cz), &rect),
+                    app.plan_to_screen(Vec2::new(cx + stepf, cz), &rect),
+                    app.plan_to_screen(Vec2::new(cx + stepf, cz + stepf), &rect),
+                    app.plan_to_screen(Vec2::new(cx, cz + stepf), &rect),
+                ];
+                if quad.iter().all(|p| rect.contains(*p)) || rect.contains(quad[0]) {
+                    let acc = t.accent;
+                    painter.add(egui::Shape::convex_polygon(
+                        quad.to_vec(),
+                        Color32::from_rgba_unmultiplied(acc.r(), acc.g(), acc.b(), 30),
+                        Stroke::new(1.2, acc.gamma_multiply(0.75)),
+                    ));
+                }
+            }
+
             // ---------- curves, PASS 1: road bodies ----------
             // Draw order fixed (the old "messy vector" plan): bodies →
             // junction pads → markings. Junction polygons used to be painted

@@ -808,11 +808,13 @@ impl Env {
     }
 }
 
-/// The engine's day look: pale haze fog + zenith-blue sky over grass terrain.
+/// The engine's day look: warm pale haze — the R13 grade. The old zenith
+/// was a saturated blue (92,138,198) the user asked to see gone; the sky
+/// now melts from a soft grey-blue into a warm haze, matching the fog.
 pub const ENV_DAY: Env = Env {
-    clear: [178, 199, 220, 255],
-    zenith: [92.0 / 255.0, 138.0 / 255.0, 198.0 / 255.0],
-    horizon: [199.0 / 255.0, 214.0 / 255.0, 229.0 / 255.0],
+    clear: [186, 192, 196, 255],
+    zenith: [126.0 / 255.0, 148.0 / 255.0, 172.0 / 255.0],
+    horizon: [214.0 / 255.0, 214.0 / 255.0, 206.0 / 255.0],
 };
 
 /// The raster multiplies every fragment by `0.38 + 0.62 * (n·l)`; up-facing

@@ -74,7 +74,10 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
     ensure_scene(app);
     let t = egui_kit::tokens(ctx);
 
-    // 3D-specific controls (global chrome lives in the control bar)
+    // 3D controls — R13 de-clutter: ONE shading picker + ONE sim picker +
+    // the two meaningful toggles (grid, points). The rest (Top/45° presets,
+    // props/lanes/spin toggles, Rebuild) are gone: props + lanes always
+    // dress the roads, the camera has orbit/pan/zoom + Fit/Cam buttons.
     egui::TopBottomPanel::top("v3d_controls")
         .frame(
             egui::Frame::none()
@@ -84,75 +87,65 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
         )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if egui_kit::btn(ui, "Top", false).on_hover_text("Top-down view").clicked() {
-                    app.cam.pitch = 1.35;
-                }
-                if egui_kit::btn(ui, "45°", false).on_hover_text("Hero 45° view").clicked() {
-                    app.cam.pitch = 0.52;
-                    app.cam.yaw = 0.65;
-                }
-                ui.separator();
-                ui.toggle_value(&mut app.render.show_grid, "grid").on_hover_text("Show the TerraZone ground grid — clean screen-space reference lines hugging the engine terrain");
-                ui.toggle_value(&mut app.render.show_props, "props").on_hover_text("Show GLB props");
-                ui.toggle_value(&mut app.render.show_lanes, "lanes").on_hover_text("Show the generated AI RoadLanes (GRG draw_lanes)");
-                ui.toggle_value(&mut app.render.show_points, "points").on_hover_text("Show every RoadPoint as a clickable marker — click one to select it and see its red X / green Y / blue Z axis lines (Terrazon gizmo)");
-                ui.toggle_value(&mut app.render.spin, "spin").on_hover_text("Auto-orbit the camera");
-                if ui
-                    .toggle_value(&mut app.render.flow_on, "lane-sim")
-                    .on_hover_text("Lane-graph simulation (simflow): cars align per lane, take turn connectors, queue at red lights and yield at zebra crossings")
-                    .clicked()
-                {
-                    if app.render.flow_on && app.render.sim_on {
-                        app.render.sim_on = false;
-                        app.render.sim = None;
-                    }
-                    app.render.dirty = true;
-                }
-                if ui
-                    .toggle_value(&mut app.render.sim_on, "traffic")
-                    .on_hover_text("Simulate traffic — vehicle agents obey the junction signals")
-                    .clicked()
-                {
-                    if app.render.sim_on && app.render.flow_on {
-                        app.render.flow_on = false;
-                        app.render.flow = None;
-                    }
-                    if app.render.sim_on && app.render.sim.is_none() {
-                        let sc = app.scene.borrow();
-                        app.render.sim = Some(
-                            roadkit::TrafficSim::new(
-                                &sc.curves,
-                                &sc.junctions,
-                                roadkit::SimSettings {
-                                    density: app.render.sim_density,
-                                    left_hand: app.render.sim_left_hand,
-                                    ..Default::default()
-                                },
-                            )
-                            .with_registry(&app.signals, &sc.junctions, &sc.curves),
-                        );
-                    }
-                    app.render.dirty = true;
-                }
-                // Blender-style viewport shading chips
-                for (mode, label) in [
-                    (roadkit::raster::ShadeMode::Solid, "solid"),
-                    (roadkit::raster::ShadeMode::Normals, "normals"),
-                    (roadkit::raster::ShadeMode::Wireframe, "wire"),
-                    (roadkit::raster::ShadeMode::ShadedWire, "shaded+w"),
-                    (roadkit::raster::ShadeMode::Depth, "depth"),
-                    (roadkit::raster::ShadeMode::Quality, "quality"),
-                ] {
-                    let on = app.render.shading == mode;
-                    if ui
-                        .selectable_label(on, RichText::new(label).size(11.0))
-                        .on_hover_text(format!("Viewport shading: {label} (Blender-style modes)"))
-                        .clicked()
-                    {
-                        app.render.shading = mode;
-                        app.render.dirty = true;
-                    }
-                }
+                // viewport shading (Blender-style modes) — one compact combo
+                egui::ComboBox::from_id_source("shade_mode")
+                    .selected_text(format!("{:?}", app.render.shading))
+                    .width(96.0)
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            roadkit::raster::ShadeMode::Solid,
+                            roadkit::raster::ShadeMode::Normals,
+                            roadkit::raster::ShadeMode::Wireframe,
+                            roadkit::raster::ShadeMode::ShadedWire,
+                            roadkit::raster::ShadeMode::Depth,
+                            roadkit::raster::ShadeMode::Quality,
+                        ] {
+                            if ui
+                                .selectable_label(app.render.shading == mode, format!("{mode:?}"))
+                                .clicked()
+                            {
+                                app.render.shading = mode;
+                                app.render.dirty = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Viewport shading (Blender-style modes)");
+
+                // traffic engine — one compact combo instead of three toggles
+                let sim_mode = if app.render.sim_on {
+                    1
+                } else if app.render.flow_on {
+                    2
+                } else {
+                    0
+                };
+                egui::ComboBox::from_id_source("sim_mode")
+                    .selected_text(match sim_mode {
+                        1 => "traffic",
+                        2 => "lane-sim",
+                        _ => "no sim",
+                    })
+                    .width(84.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(sim_mode == 0, "no sim").clicked() {
+                            app.render.sim_on = false;
+                            app.render.flow_on = false;
+                            app.render.dirty = true;
+                        }
+                        if ui.selectable_label(sim_mode == 1, "traffic").on_hover_text("Vehicle agents obey the junction signals").clicked() {
+                            app.render.sim_on = true;
+                            app.render.flow_on = false;
+                            app.render.flow = None;
+                            app.render.dirty = true;
+                        }
+                        if ui.selectable_label(sim_mode == 2, "lane-sim").on_hover_text("Lane-graph simulation (simflow): per-lane alignment, turn connectors, red-light queues").clicked() {
+                            app.render.sim_on = false;
+                            app.render.sim = None;
+                            app.render.flow_on = true;
+                            app.render.dirty = true;
+                        }
+                    });
                 if app.render.sim_on {
                     ui.add(
                         egui::Slider::new(&mut app.render.sim_density, 4.0..=60.0)
@@ -160,11 +153,25 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                             .integer(),
                     );
                 }
-                if egui_kit::btn(ui, "Rebuild", false).on_hover_text("Rebuild the scene mesh from the current script state").clicked() {
+
+                ui.separator();
+                if ui
+                    .toggle_value(&mut app.render.show_grid, "grid")
+                    .on_hover_text("Show the ground grid — screen-space reference lines hugging the terrain, the hovered cell lights up")
+                    .changed()
+                {
                     app.render.dirty = true;
                 }
+                if ui
+                    .toggle_value(&mut app.render.show_points, "points")
+                    .on_hover_text("Show every RoadPoint as a clickable marker")
+                    .changed()
+                {
+                    app.render.dirty = true;
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new("LMB orbit · wheel smooth-zoom · RMB pan · arrows/WASD pan · double-click zoom · R reset").size(10.5).color(t.text_dim));
+                    ui.label(RichText::new("LMB orbit · wheel zoom · RMB pan · F fit").size(10.5).color(t.text_dim));
                 });
             });
         });
@@ -348,9 +355,12 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             );
 
             // ---- TerraZone ground grid (screen-space reference lines) ----
+            // + the hovered cell's SURFACE highlight (R13: "the surface of
+            // the cursor on grid to be highlighted well")
             if app.render.show_grid {
                 draw_ground_grid(app, ui, rect, &scene);
                 draw_grid_ruler(app, ui, rect);
+                draw_cursor_cell_highlight(app, ui, rect, &response);
             }
 
             // ---- RoadPoint markers: click to select, XYZ tripod on the
@@ -546,18 +556,11 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 egui::FontId::monospace(11.0),
                 egui::Color32::from_rgba_unmultiplied(235, 235, 235, 220),
             );
-            let hint = if app.render.show_props {
-                "GLB props joined along procedural RoadPoint curves (GRG-style)"
-            } else {
-                "props hidden"
-            };
-            ui.painter().text(
-                egui::Pos2::new(rect.left() + 10.0, rect.bottom() - 8.0),
-                egui::Align2::LEFT_BOTTOM,
-                hint,
-                egui::FontId::monospace(10.0),
-                egui::Color32::from_rgba_unmultiplied(160, 160, 160, 200),
-            );
+
+            // ---- 2D plan card riding ON TOP of the 3D view (bottom-left):
+            // the same grid system the 3D ground shows, as a map overlay.
+            // Click it to open the full 2D Plan editor.
+            crate::minimap::draw(app, ui, rect, &response);
 
             // ---- Godot-style axis gizmo (top-right, pure overlay) ----
             draw_axis_gizmo(app, ui, rect, &response, point_hit.is_none());
@@ -1552,4 +1555,61 @@ fn draw_grid_ruler(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect) {
     if let Some((az, _)) = oc.xform(t.x as f64, 0.05, t.z as f64 + 40.0) {
         painter.text(az, egui::Align2::CENTER_CENTER, "Z", egui::FontId::proportional(11.0), egui::Color32::from_rgba_unmultiplied(96, 140, 230, 200));
     }
+}
+
+/// R13: highlight the SURFACE of the grid cell under the cursor — the
+/// hovered cell (same metre ladder as the ground grid) fills with the
+/// accent at low alpha + a stronger stroke, projected onto the terrain /
+/// deck plane so it hugs the surface exactly like the grid lines do.
+fn draw_cursor_cell_highlight(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, response: &egui::Response) {
+    let Some(pointer) = response.hover_pos() else {
+        return;
+    };
+    if !rect.contains(pointer) {
+        return;
+    }
+    let Some(scene) = app.render.scene3d.as_ref() else {
+        return;
+    };
+    let oc = OverlayCam::new(app, rect);
+    // same plane logic as the cursor gizmo: ride a bridge deck when the
+    // pointer is over an elevated RoadPoint, else the ground
+    let mut plane_y = 0.0f64;
+    if let Some((ci, pi)) = nearest_elevated_point(app, pointer, &oc) {
+        plane_y = app.scene.borrow().curves[ci].points[pi].elev;
+    }
+    let Some((wx, _, wz)) = oc.ground_hit(app, pointer, plane_y) else {
+        return;
+    };
+    let s = grid_spacing(app.cam.dist);
+    let sd = s as f64;
+    let (cx, cz) = ((wx / sd).floor() * sd, (wz / sd).floor() * sd);
+    let lift = 0.035f32;
+    let y = if plane_y > 0.0 { plane_y as f32 + lift } else {
+        scene.sampler.as_ref().map(|g| g.height(cx as f32, cz as f32)).unwrap_or(0.0) + lift
+    };
+    let corners = [
+        [cx as f32, cz as f32],
+        [(cx + sd) as f32, cz as f32],
+        [(cx + sd) as f32, (cz + sd) as f32],
+        [cx as f32, (cz + sd) as f32],
+    ];
+    let mut pts: Vec<egui::Pos2> = Vec::with_capacity(4);
+    for c in &corners {
+        match oc.xform(c[0] as f64, y as f64, c[1] as f64) {
+            Some((p, _)) => pts.push(p),
+            None => return, // a corner behind the camera — skip the highlight
+        }
+    }
+    let t = egui_kit::tokens(ui.ctx());
+    let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
+    painter.add(egui::Shape::convex_polygon(
+        pts.clone(),
+        egui::Color32::from_rgba_unmultiplied(t.accent.r(), t.accent.g(), t.accent.b(), 46),
+        egui::Stroke::new(1.6, t.accent.gamma_multiply(0.9)),
+    ));
+    // small centre tick
+    let c = (pts[0].to_vec2() + pts[1].to_vec2() + pts[2].to_vec2() + pts[3].to_vec2()) * 0.25;
+    let c = egui::Pos2::new(c.x, c.y);
+    painter.circle_filled(c, 1.8, t.accent);
 }
