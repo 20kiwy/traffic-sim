@@ -1,15 +1,15 @@
 [submodule "_sources/godot-road-generator"]
-	path = _sources/godot-road-generator
+	path = clone/godot-road-generator
 	url = https://github.com/TheDuckCow/godot-road-generator.git
 [submodule "_sources/Traffic-Toolkit-DOTS"]
-	path = _sources/Traffic-Toolkit-DOTS
+	path = clone/Traffic-Toolkit-DOTS
 	url = https://github.com/pekaram/Traffic-Toolkit-DOTS.git
 [submodule "_sources/Mapkit"]
-	path = _sources/Mapkit
+	path = clone/Mapkit
 	url = https://github.com/kiwy-monzy/Mapkit.git
 [submodule "_sources/egregoria"]
-	path = _sources/egregoria
+	path = clone/egregoria
 	url = https://github.com/uriopass/egregoria.git
 [submodule "_sources/TerraZone"]
-	path = _sources/TerraZone
+	path = clone/TerraZone
 	url = https://github.com/20kiwy/TerraZone.git

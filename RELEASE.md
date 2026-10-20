@@ -6,7 +6,7 @@ New in v0.2.0 (vs v0.1.0 baseline)
 - Fresh render set under Xvfb + lavapipe (screenshots/v02kijazi_*.png, screenshots/v02igesa_*.png)
 - Published versioned gallery: public/traffic-sim/v0.2.0/ (12 shots)
 - Downloadable source bundle: download/traffic-sim.zip (also public/download/traffic-sim.zip)
-- Upstream sources pinned as git submodules under _sources/: godot-road-generator,
+- Upstream sources pinned as git submodules under clone/: godot-road-generator,
   Traffic-Toolkit-DOTS, Mapkit, egregoria
 
 Data / features carried from v0.1.0
