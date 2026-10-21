@@ -21,6 +21,7 @@ fn print_help() {
     println!();
     println!("USAGE");
     println!("  roadkit-cli --script <bundled|path.gd> [--view plan|3d --out f.png]... [--zoom N] [--size WxH] [--ss N] [--focus x,z,r]");
+    println!("  roadkit-cli --opendrive <file.xodr> [--view 3d --out f.png] [--step 15] [--emit-script out.gd]");
     println!("  roadkit-cli --data kijazi|igesa [--shots N] [--size WxH] [--sim S] [--ss N] [--no-hud]   # OSM/Mapbox import");
     println!();
     println!("Bundled scripts are looked up in assets/scripts and assets/scenarios.");
@@ -125,6 +126,85 @@ fn cli_run(args: &[String]) -> i32 {
                 }
                 0
             }
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        };
+    }
+    // ---- OpenDRIVE import: .xodr → native importer → .gd → world → views ----
+    // roadkit-cli --opendrive <file.xodr> [--view 3d --out road.png] [--step 15]
+    if let Some(xodr) = arg_of(args, "--opendrive") {
+        let xml = std::fs::read_to_string(&xodr)
+            .map_err(|e| format!("read {xodr}: {e}"))
+            .unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            });
+        let step: f64 = arg_of(args, "--step").and_then(|s| s.parse().ok()).unwrap_or(15.0);
+        let map = roadkit::opendrive::OpenDriveMap::parse(&xml).unwrap_or_else(|e| {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        });
+        println!(
+            "opendrive: rev {}.{:02} · {} roads · {} m total",
+            map.rev_major,
+            map.rev_minor,
+            map.roads.len(),
+            map.roads.iter().map(|r| r.length as usize).sum::<usize>()
+        );
+        let script = map.to_gd_script(step);
+        if let Some(dst) = arg_of(args, "--emit-script") {
+            std::fs::write(&dst, &script).map_err(|e| format!("write {dst}: {e}")).unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            });
+            println!("script dumped to {dst}");
+        }
+
+        let zoom: f32 = arg_of(args, "--zoom").and_then(|z| z.parse().ok()).unwrap_or(1.0);
+        let ss: usize = arg_of(args, "--ss").and_then(|s| s.parse().ok()).unwrap_or(1).clamp(1, 4);
+        let sim_seconds: f64 = arg_of(args, "--sim").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let density: f64 = arg_of(args, "--density").and_then(|s| s.parse().ok()).unwrap_or(14.0);
+        let focus = arg_of(args, "--focus").and_then(|s| {
+            let mut it = s.split(',');
+            let x: f64 = it.next()?.trim().parse().ok()?;
+            let z: f64 = it.next()?.trim().parse().ok()?;
+            let r: f64 = it.next()?.trim().parse().ok()?;
+            Some((x, z, r))
+        });
+        let size = arg_of(args, "--size").unwrap_or_else(|| "1280x800".into());
+        let (w, h) = {
+            let mut it = size.split('x');
+            let w: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1280);
+            let h: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(800);
+            (w, h)
+        };
+        let mut views: Vec<(String, PathBuf)> = Vec::new();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            if a == "--view" {
+                let v = it.next().cloned().unwrap_or_else(|| "3d".into());
+                let peek = it.next().cloned();
+                let out = match peek {
+                    Some(p) if !p.starts_with("--") => Some(p),
+                    _ => arg_of(args, "--out"),
+                };
+                if let Some(o) = out {
+                    views.push((v, PathBuf::from(o)));
+                }
+            }
+        }
+        if views.is_empty() {
+            if let (Some(v), Some(o)) = (arg_of(args, "--view"), arg_of(args, "--out")) {
+                views.push((v, PathBuf::from(o)));
+            }
+        }
+        if views.is_empty() {
+            views.push(("3d".into(), PathBuf::from("roadkit-opendrive.png")));
+        }
+        return match roadkit_cli::render_source_sim(&script, &views, zoom, w, h, ss, focus, sim_seconds, density) {
+            Ok(()) => 0,
             Err(e) => {
                 eprintln!("error: {e}");
                 1

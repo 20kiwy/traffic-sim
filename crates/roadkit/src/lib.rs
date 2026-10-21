@@ -14,6 +14,7 @@ pub mod export;
 pub mod flow;
 pub mod glb;
 pub mod library;
+pub mod opendrive;
 pub mod props;
 pub mod raster;
 pub mod scene;

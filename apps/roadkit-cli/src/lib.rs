@@ -72,6 +72,21 @@ pub fn build_world_named(script_name: &str) -> Result<(World, std::path::PathBuf
     Ok((build_world(&src, &assets)?, path))
 }
 
+/// Build the world from raw script SOURCE (no file) — e.g. the OpenDRIVE
+/// importer's generated .gd. assets/ is found by walking up from the CWD.
+pub fn build_world_source(src: &str) -> Result<World, String> {
+    let mut cur = std::env::current_dir().map_err(|e| e.to_string())?;
+    for _ in 0..6 {
+        if cur.join("assets/glb").exists() {
+            return build_world(src, &cur.join("assets"));
+        }
+        if !cur.pop() {
+            break;
+        }
+    }
+    Err("assets dir (assets/glb) not found — run from the repo root".into())
+}
+
 fn find_assets_dir(script_path: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let mut cur = script_path.ancestors().find(|a| a.join("assets/glb").exists()).map(|a| a.join("assets"));
     if cur.is_none() {
@@ -603,8 +618,43 @@ pub fn render_named_sim(
     density: f64,
 ) -> Result<(), String> {
     let (world, _path) = build_world_named(script)?;
+    render_world_sim(&world, views, zoom, w, h, ss, focus, sim_seconds, density)
+}
+
+/// Same as `render_named_sim` but for generated script SOURCE (e.g. the
+/// OpenDRIVE importer's output — no .gd file needed).
+#[allow(clippy::too_many_arguments)]
+pub fn render_source_sim(
+    src: &str,
+    views: &[(String, std::path::PathBuf)],
+    zoom: f32,
+    w: u32,
+    h: u32,
+    ss: usize,
+    focus: Option<(f64, f64, f64)>,
+    sim_seconds: f64,
+    density: f64,
+) -> Result<(), String> {
+    let world = build_world_source(src)?;
+    render_world_sim(&world, views, zoom, w, h, ss, focus, sim_seconds, density)
+}
+
+/// Render one world through every (view, out) pair — the shared tail of
+/// render_named_sim / render_source_sim.
+#[allow(clippy::too_many_arguments)]
+fn render_world_sim(
+    world: &World,
+    views: &[(String, std::path::PathBuf)],
+    zoom: f32,
+    w: u32,
+    h: u32,
+    ss: usize,
+    focus: Option<(f64, f64, f64)>,
+    sim_seconds: f64,
+    density: f64,
+) -> Result<(), String> {
     for (view, out) in views {
-        let rgba = render_view_sim(&world, view, zoom, w as usize, h as usize, ss, focus, sim_seconds, density)?;
+        let rgba = render_view_sim(world, view, zoom, w as usize, h as usize, ss, focus, sim_seconds, density)?;
         encode_png(out, &rgba, w, h)?;
         println!("wrote {} ({} x {})", out.display(), w, h);
     }

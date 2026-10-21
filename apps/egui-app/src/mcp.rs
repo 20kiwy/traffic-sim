@@ -308,6 +308,7 @@ fn tools_json() -> Vec<Value> {
         json!({"name":"get_scene","description":"Full scene JSON: curves, points (lanes/median/dirt...), junctions, props, stats","inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"get_state","description":"Editor state: tab, tool, open panels, selection, status, stats","inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"render_3d","description":"Render the 3D scene to PNG (headless software renderer). Optional camera control or focus area, optional traffic sim","inputSchema":{"type":"object","properties":{"out":{"type":"string","description":"png path"},"source":{"type":"string","description":"optional .gd source (defaults to the session scene's script)"},"width":{"type":"integer"},"height":{"type":"integer"},"yaw":{"type":"number"},"pitch":{"type":"number"},"dist":{"type":"number"},"focus_x":{"type":"number"},"focus_z":{"type":"number"},"focus_r":{"type":"number"},"sim_seconds":{"type":"number"},"density":{"type":"number"},"atmo":{"type":"boolean","description":"true = Egregoria atmosphere (sky/fog). Default false = the app's editor look (flat backdrop + grid)"}},"required":["out"]}}),
+        json!({"name":"load_opendrive","description":"Import an OpenDRIVE (.xodr) road network through the native importer (planView line/arc/spiral + elevationProfile + laneSections) — replaces the session scene with the generated RoadKit script","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"path to the .xodr file"},"step":{"type":"number","description":"centerline sample step in metres (default 15)"}},"required":["path"]}}),
         json!({"name":"render_plan","description":"Render the 2D plan (top-down blueprint) to PNG","inputSchema":{"type":"object","properties":{"out":{"type":"string"},"source":{"type":"string"},"width":{"type":"integer"},"height":{"type":"integer"},"zoom":{"type":"number"}},"required":["out"]}}),
         json!({"name":"list_actions","description":"Every registered UI action (id, label, location, hotkey) — the full button map","inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"do_action","description":"Execute a UI action headlessly (same implementation as the button) and get a state diff","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}),
@@ -352,6 +353,25 @@ fn call_tool(sess: &mut Session, name: &str, args: &Value) -> Result<Value, Stri
             let src = all[idx].2.to_string();
             let diff = sess.run(&src)?;
             Ok(json!({"result": diff, "demo": all[idx].0, "stats": sess.stats_json()}))
+        }
+        "load_opendrive" => {
+            // native OpenDRIVE import (crates/roadkit/src/opendrive.rs):
+            // .xodr → sampled centerlines (line/arc/spiral + elevation +
+            // lanes) → generated .gd → the regular session scene
+            let path = args.get("path").and_then(|v| v.as_str()).ok_or("missing 'path'")?;
+            let step = args
+                .get("step")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(15.0)
+                .clamp(2.0, 200.0);
+            let xml = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+            let script = roadkit::opendrive::xodr_to_gd_script(&xml, step)?;
+            let diff = sess.run(&script)?;
+            Ok(json!({
+                "result": diff,
+                "import": format!("{path} @ {step:.0} m step"),
+                "stats": sess.stats_json(),
+            }))
         }
         "get_scene" => Ok(sess.scene_json()),
         "get_state" => Ok(sess.state_json()),
