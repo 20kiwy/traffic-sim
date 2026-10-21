@@ -154,18 +154,21 @@ pub fn render_view_sim(
                 props.extend(sim.prop_instances(&world.scene.curves));
             }
             let scene = build_scene_with_bg(&world.scene.curves, &world.scene.junctions, &props, &world.library, true, roadkit::ENV_DAY.clear);
+            let env = roadkit::scene::Environment::from_env();
             if ss <= 1 {
-                return Ok(roadkit::render_scene_env_shaded(&scene, &world.library, &world.textures, &cam, w, h, roadkit::ENV_DAY, &[], shade_from_env()));
+                return Ok(roadkit::scene::render_env_shaded(&scene, &world.library, &world.textures, &cam, w, h, &env, &[], true, shade_from_env()));
             }
-            let big = render_scene_env(
+            let big = roadkit::scene::render_env_shaded(
                 &scene,
                 &world.library,
                 &world.textures,
                 &cam,
                 w * ss,
                 h * ss,
-                roadkit::ENV_DAY,
+                &env,
                 &[],
+                true,
+                roadkit::raster::ShadeMode::Solid,
             );
             Ok(box_downsample(&big, w * ss, h * ss, ss))
         }
@@ -269,6 +272,7 @@ pub fn frame_cam_focused(
         dist,
         yaw,
         pitch,
+        ..Default::default()
     }
 }
 
@@ -637,10 +641,11 @@ pub fn render_3d_camera(
         props.extend(sim.prop_instances(&world.scene.curves));
     }
     let scene = build_scene_with_bg(&world.scene.curves, &world.scene.junctions, &props, &world.library, true, roadkit::ENV_DAY.clear);
+    let env = roadkit::scene::Environment::from_env();
     if ss <= 1 {
-        return render_scene_env(&scene, &world.library, &world.textures, cam, w, h, roadkit::ENV_DAY, &[]);
+        return roadkit::scene::render_env_shaded(&scene, &world.library, &world.textures, cam, w, h, &env, &[], true, roadkit::raster::ShadeMode::Solid);
     }
-    let big = render_scene_env(&scene, &world.library, &world.textures, cam, w * ss, h * ss, roadkit::ENV_DAY, &[]);
+    let big = roadkit::scene::render_env_shaded(&scene, &world.library, &world.textures, cam, w * ss, h * ss, &env, &[], true, roadkit::raster::ShadeMode::Solid);
     box_downsample(&big, w * ss, h * ss, ss)
 }
 
@@ -761,7 +766,7 @@ pub fn render_dsm(
             }
             props.extend(sim.prop_instances(&dsm.curves));
         }
-        let enrich = roadkit::dsm::dsm_buildings(&dsm.curves);
+        let enrich: Vec<roads::mesh3d::MeshPart> = if std::env::var("ROADKIT_NOEXTRAS").is_ok() { Vec::new() } else { roadkit::dsm::dsm_buildings(&dsm.curves) };
         let scene = roadkit::scene::build_scene_enriched(
             &dsm.curves,
             &junctions,
@@ -776,6 +781,7 @@ pub fn render_dsm(
         );
         eprintln!("[dsm] {name}: cam.dist={:.0} radius={:.0} curves={} junctions={} lights={}", cam.dist, scene.radius_m, dsm.curves.len(), junctions.len(), dsm.registry.entries.len());
         let shade = shade_from_env();
+        let env = roadkit::scene::Environment::from_env();
         let (rw, rh) = if shade == roadkit::raster::ShadeMode::Quality {
             (w as usize, h as usize) // Quality does its own 2x SSAA
         } else if ss > 1 {
@@ -783,7 +789,7 @@ pub fn render_dsm(
         } else {
             (w as usize, h as usize)
         };
-        let big = roadkit::render_scene_env_shaded(&scene, &library, &textures, &cam, rw, rh, roadkit::ENV_DAY, &[], shade);
+        let big = roadkit::scene::render_env_shaded(&scene, &library, &textures, &cam, rw, rh, &env, &[], true, shade);
         let rgba = if rw != w as usize {
             box_downsample(&big, rw, rh, rw / w as usize)
         } else {
@@ -839,8 +845,10 @@ pub fn render_dsm_appcam(w: u32, h: u32) -> Result<(), String> {
         dist: 420.0,
         pitch: 0.62,
         yaw: 0.65,
+        ..Default::default()
     };
-    let rgba = render_scene_env(&scene, &library, &textures, &cam, w as usize, h as usize, roadkit::ENV_DAY, &[]);
+    let env = roadkit::scene::Environment::from_env();
+    let rgba = roadkit::scene::render_env_shaded(&scene, &library, &textures, &cam, w as usize, h as usize, &env, &[], true, roadkit::raster::ShadeMode::Solid);
     encode_png(std::path::Path::new("dsm_appcam.png"), &rgba, w, h)?;
     Ok(())
 }

@@ -6,11 +6,15 @@
 //! Scene space = METERS, x east, y up, z south.
 
 use crate::library::AssetLibrary;
-use crate::raster::{Frame, ShadeMode};
+use crate::raster::{
+    box_downsample_f32, EnvCompose, Frame, ShadeMode, ShadowData,
+};
 use crate::textures::TextureLibrary;
+use engine::atmosphere::{FogLut, SkyLut};
 use gdmath::vec3::Vec3;
 use gdmath::Mat4;
 use roads::junction::{marking_parts_for, mesh_parts_for};
+use std::sync::Arc;
 
 /// The bbox-centre recentering `build_scene` applies (public so CLI/app
 /// cameras can aim at the SAME shifted coordinates — a focus point in
@@ -613,13 +617,20 @@ impl TerrainFlatten {
     /// Flattened terrain height at a world (x, z): hills, snapped to the
     /// nearest road elevation inside half-width + edge_margin, smoothly
     /// eased back over edge_falloff (GRG APPROXIMATE method).
+    ///
+    /// R15 fix: where several roads compete (grade-separated interchanges),
+    /// the ground follows the LOWEST in-range road envelope, not the nearest
+    /// sample — the nearest heuristic let a descending flyover ramp lift the
+    /// ground ABOVE the at-grade underpass road, burying it (its markings
+    /// then z-fought through the ground as a fan of dashes).
     fn height(&self, t: &roads::terrain::TerrainState, x: f64, z: f64) -> f64 {
         let hill = t.hill_height(x, z);
         if self.samples.is_empty() {
             return hill;
         }
         let (gx, gz) = ((x / self.cell).floor() as i64, (z / self.cell).floor() as i64);
-        let mut best: Option<(f64, f64, f64)> = None; // (dist, road_y, half_width)
+        // lowest in-range road envelope: (road_y, half_width, falloff dist)
+        let mut best: Option<(f64, f64, f64)> = None;
         for dx in -1i64..=1 {
             for dz in -1i64..=1 {
                 if let Some(list) = self.hash.get(&(gx + dx, gz + dz)) {
@@ -627,14 +638,14 @@ impl TerrainFlatten {
                         let s = &self.samples[i as usize];
                         let d = ((s.x - x).powi(2) + (s.z - z).powi(2)).sqrt();
                         let span = s.hw + t.edge_margin + t.edge_falloff;
-                        if d <= span && best.map(|(bd, _, _)| d < bd).unwrap_or(true) {
-                            best = Some((d, s.y, s.hw));
+                        if d <= span && best.map(|(by, _, _)| s.y < by).unwrap_or(true) {
+                            best = Some((s.y, s.hw, d));
                         }
                     }
                 }
             }
         }
-        let Some((d, ry, hw)) = best else {
+        let Some((ry, hw, d)) = best else {
             return hill;
         };
         let m = hw + t.edge_margin;
@@ -687,10 +698,47 @@ const GRASS_RAMP: [[f32; 3]; 6] = [
 /// Flat base grass (ramp band 1) — the color the grid lines melt into.
 const GRASS_BASE: [f32; 3] = [0.47, 0.64, 0.31];
 
+/// Egregoria terrain blending: sand near the waterline, seabed below.
+/// (heightmap.frag.wgsl: `mix(sand_col, c, smoothstep(-5, 0, z))`,
+/// `mix(sea_col, c, smoothstep(-25, -20, z))` — our coast constants.)
+const SAND_COL: [f32; 3] = [0.76, 0.71, 0.55];
+const SEA_COL: [f32; 3] = [0.13, 0.20, 0.26];
+
+/// Mean linear-ish albedo of the generated `terrain_grass.raw` texture
+/// (assets/textures_src/gen_env_textures.py targets rgb ≈ 101,126,58).
+/// Band colors are pre-DIVIDED by this so `tint × texel ≈ band color`.
+const GRASS_TEX_MEAN: [f32; 3] = [0.396, 0.494, 0.227];
+
+/// Tint = ramp color normalized by the grass texture mean (so the product
+/// lands on the intended ramp color), clamped to a sane range.
+fn grass_tint(c: [f32; 3]) -> [f32; 4] {
+    [
+        (c[0] / GRASS_TEX_MEAN[0]).clamp(0.2, 4.0),
+        (c[1] / GRASS_TEX_MEAN[1]).clamp(0.2, 4.0),
+        (c[2] / GRASS_TEX_MEAN[2]).clamp(0.2, 4.0),
+        1.0,
+    ]
+}
+
+/// Egregoria sand/sea blend by world height (smoothsteps at -5..0 and
+/// -25..-20 m; a no-op above the waterline).
+fn coast_blend(c: [f32; 3], y: f32) -> [f32; 3] {
+    if y > -0.5 {
+        return c; // flats sit at ~0 — no beach tint without a waterline
+    }
+    let s = smoothstep(-5.0, 0.0, y);
+    let mut c = [SAND_COL[0] + (c[0] - SAND_COL[0]) * s, SAND_COL[1] + (c[1] - SAND_COL[1]) * s, SAND_COL[2] + (c[2] - SAND_COL[2]) * s];
+    let s2 = smoothstep(-25.0, -20.0, y);
+    c = [SEA_COL[0] + (c[0] - SEA_COL[0]) * s2, SEA_COL[1] + (c[1] - SEA_COL[1]) * s2, SEA_COL[2] + (c[2] - SEA_COL[2]) * s2];
+    c
+}
+
 /// Terrain ground: heightfield grid (spacing ~8 m, capped at 96x96 verts)
-/// over the scene radius. Vertices are colored by height band with the
-/// engine grass ramp; the outer ring fades into the fog/horizon color so
-/// the heightfield edge never shows a hard seam against the sky.
+/// over the scene radius. R15 Egregoria look: the heightfield is TEXTURED
+/// with the procedural grass albedo (TEX_TERRAIN_GRASS, world-space UV at
+/// 200 m tiling) tinted per height band by the engine grass ramp, blended
+/// to sand/sea below the waterline; the outer ring still fades into the
+/// haze so the heightfield edge never shows a hard seam against the sky.
 #[allow(clippy::too_many_arguments)]
 fn build_terrain_ground(
     ground: &mut Vec<ScenePart>,
@@ -721,17 +769,17 @@ fn build_terrain_ground(
         }
     }
 
-    // height bands -> one part per engine-ramp band; per-vertex colors fade
-    // the outer ring into the fog/horizon so the edge melts into the sky
+    // height bands -> one part per engine-ramp band; the band color is the
+    // per-vertex TINT over the grass texture; the rim fades into the haze
     const BANDS: usize = GRASS_RAMP.len();
     let mut band_parts: Vec<ScenePart> = (0..BANDS)
         .map(|b| ScenePart {
             positions: vec![],
             indices: vec![],
-            color: [GRASS_RAMP[b][0], GRASS_RAMP[b][1], GRASS_RAMP[b][2], 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
             vcolors: vec![],
             uv: vec![],
-            tex: -1,
+            tex: crate::textures::TEX_TERRAIN_GRASS,
         })
         .collect();
     let inv = 1.0 / up_shade();
@@ -749,17 +797,17 @@ fn build_terrain_ground(
             let x1 = x0 + step;
             let z0 = -extent + j as f32 * step;
             let z1 = z0 + step;
-            // per-vertex color: band color -> rim haze by normalized
-            // distance from the center (only the outer ring moves)
-            let vc = |x: f32, z: f32| -> [f32; 4] {
+            // per-vertex color: band tint (over the grass texture) + coast
+            // blend + rim haze by normalized distance from the center
+            let vc = |x: f32, z: f32, y: f32| -> [f32; 4] {
+                let c = coast_blend(GRASS_RAMP[b], y);
                 let t = (x.abs() / extent).max(z.abs() / extent);
                 let f = smoothstep(0.72, 1.0, t);
-                [
-                    GRASS_RAMP[b][0] + (rim[0] - GRASS_RAMP[b][0]) * f,
-                    GRASS_RAMP[b][1] + (rim[1] - GRASS_RAMP[b][1]) * f,
-                    GRASS_RAMP[b][2] + (rim[2] - GRASS_RAMP[b][2]) * f,
-                    1.0,
-                ]
+                grass_tint([
+                    c[0] + (rim[0] - c[0]) * f,
+                    c[1] + (rim[1] - c[1]) * f,
+                    c[2] + (rim[2] - c[2]) * f,
+                ])
             };
             let part = &mut band_parts[b];
             let base = part.positions.len() as u32;
@@ -769,8 +817,15 @@ fn build_terrain_ground(
                 Vec3::new(x0, y01, z1),
                 Vec3::new(x1, y11, z1),
             ]);
+            // world-space grass UV (200 m tiles, Egregoria wpos.xy/200)
+            part.uv.extend_from_slice(&[
+                [(x0 + cx) / 200.0, (z0 + cz) / 200.0],
+                [(x1 + cx) / 200.0, (z0 + cz) / 200.0],
+                [(x0 + cx) / 200.0, (z1 + cz) / 200.0],
+                [(x1 + cx) / 200.0, (z1 + cz) / 200.0],
+            ]);
             part.vcolors
-                .extend_from_slice(&[vc(x0, z0), vc(x1, z0), vc(x0, z1), vc(x1, z1)]);
+                .extend_from_slice(&[vc(x0, z0, y00), vc(x1, z0, y10), vc(x0, z1, y01), vc(x1, z1, y11)]);
             part.indices
                 .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
         }
@@ -817,6 +872,377 @@ pub const ENV_DAY: Env = Env {
     horizon: [214.0 / 255.0, 214.0 / 255.0, 206.0 / 255.0],
 };
 
+// ---------------------------------------------------------------------------
+// R15 — the Egregoria 3D environment (engine remake)
+// ---------------------------------------------------------------------------
+
+/// The full 3D environment state, ported from the Egregoria engine.
+/// Owns the sky LUT (rebuilt when the sun moves — i.e. when the time of
+/// day changes), the analytic sun, and the render-time environment flags.
+/// Passed by reference to the render entry; cheap to clone around threads.
+#[derive(Clone)]
+pub struct Environment {
+    /// time of day in seconds (engine::sun day model, day starts 08:00)
+    pub time_of_day: f64,
+    /// normalized direction TOWARD the sun (y up)
+    pub sun: Vec3,
+    /// linear sun color × intensity (can exceed 1 at noon)
+    pub sun_col: [f32; 3],
+    /// single-scattering sky LUT (lat-long, 256×128)
+    pub sky: Arc<SkyLut>,
+    /// sea/water surface height (y). None = no water plane.
+    pub water_level: Option<f32>,
+    /// draw 10 m / 50 m elevation contour lines on the ground
+    pub contours: bool,
+    /// render the sun shadow map (single cascade)
+    pub shadows: bool,
+    /// wave/animation clock (static in still renders; the app may advance it)
+    pub env_time: f32,
+}
+
+impl Environment {
+    /// Build the environment for a time of day (seconds) and flags.
+    /// The sky LUT is rebuilt here (the only expensive step, ~33k
+    /// atmosphere ray-marches — done once per sun change, not per frame).
+    pub fn new(
+        time_of_day: f64,
+        shadows: bool,
+        contours: bool,
+        water_level: Option<f32>,
+    ) -> Self {
+        let dir = engine::sun::sun_dir(time_of_day).normalized();
+        let col = engine::sun::sun_color(dir);
+        let sky = SkyLut::build(dir);
+        Environment {
+            time_of_day,
+            sun: dir,
+            sun_col: [col[0], col[1], col[2]],
+            sky: Arc::new(sky),
+            water_level,
+            contours,
+            shadows,
+            env_time: 0.0,
+        }
+    }
+
+    /// The default editor look: mid-morning sun (10:00), shadows on.
+    pub fn day() -> Self {
+        Self::new(10.0 * engine::sun::HOUR, true, true, None)
+    }
+
+    /// CLI wiring: build the environment from env vars so every headless
+    /// render is data-driven (no hardcoded sun):
+    /// - `ROADKIT_TIME`     — hours 0..24 (default 10)
+    /// - `ROADKIT_SHADOWS`  — 0/off disables the shadow map (default on)
+    /// - `ROADKIT_CONTOURS` — 1/on enables the 10 m/50 m contour lines
+    /// - `ROADKIT_WATER`    — sea level in meters (default: no water)
+    pub fn from_env() -> Self {
+        let hours: f64 = std::env::var("ROADKIT_TIME")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10.0);
+        let shadows = std::env::var("ROADKIT_SHADOWS")
+            .map(|v| {
+                let v = v.to_lowercase();
+                !(v == "0" || v == "off" || v == "false")
+            })
+            .unwrap_or(true);
+        let contours = std::env::var("ROADKIT_CONTOURS")
+            .map(|v| {
+                let v = v.to_lowercase();
+                v == "1" || v == "on" || v == "true"
+            })
+            .unwrap_or(true);
+        let water_level: Option<f32> = std::env::var("ROADKIT_WATER")
+            .ok()
+            .and_then(|v| v.parse().ok());
+        Self::new(hours * engine::sun::HOUR, shadows, contours, water_level)
+    }
+}
+
+/// Render the scene with the full Egregoria environment: analytic sun +
+/// sky LUT + aerial-perspective fog + sun shadows + grass-textured ground
+/// + optional water plane + contours, composed with the Egregoria
+/// tonemap. This is the R15 environment entry used by the editor (wasm +
+/// native) and the CLI.
+#[allow(clippy::too_many_arguments)]
+pub fn render_env_shaded(
+    scene: &Scene,
+    library: &AssetLibrary,
+    textures: &TextureLibrary,
+    cam: &gdmath::OrbitCam,
+    w: usize,
+    h: usize,
+    env: &Environment,
+    extra: &[PropDraw],
+    show_props: bool,
+    shade: ShadeMode,
+) -> Vec<u8> {
+    // Quality = 2× SSAA: render the env path at double size, downsample
+    // the linear HDR buffer, then compose once at output resolution.
+    if shade == ShadeMode::Quality {
+        let (hdr, depth) = render_env_buffers(
+            scene, library, textures, cam, w * 2, h * 2, env, extra, show_props,
+        );
+        let (hdr, depth) = box_downsample_f32(&hdr, &depth, w * 2, h * 2, 2);
+        return compose(
+            &hdr, &depth, w, h, cam, env,
+        );
+    }
+    let (hdr, depth) = render_env_buffers(scene, library, textures, cam, w, h, env, extra, show_props);
+    compose(&hdr, &depth, w, h, cam, env)
+}
+
+/// `render_env_shaded` with the props toggle.
+#[allow(clippy::too_many_arguments)]
+pub fn render_env_props_shaded(
+    scene: &Scene,
+    library: &AssetLibrary,
+    textures: &TextureLibrary,
+    cam: &gdmath::OrbitCam,
+    w: usize,
+    h: usize,
+    env: &Environment,
+    extra: &[PropDraw],
+    show_props: bool,
+    shade: ShadeMode,
+) -> Vec<u8> {
+    if show_props {
+        render_env_shaded(scene, library, textures, cam, w, h, env, extra, true, shade)
+    } else {
+        let mut bare = scene.clone();
+        bare.props.clear();
+        let empty: Vec<PropDraw> = Vec::new();
+        let ex: &[PropDraw] = if extra.is_empty() { &empty } else { extra };
+        render_env_shaded(&bare, library, textures, cam, w, h, env, ex, false, shade)
+    }
+}
+
+/// Raster the environment path into (linear HDR rgb3, view-depth).
+#[allow(clippy::too_many_arguments)]
+fn render_env_buffers(
+    scene: &Scene,
+    library: &AssetLibrary,
+    textures: &TextureLibrary,
+    cam: &gdmath::OrbitCam,
+    w: usize,
+    h: usize,
+    env: &Environment,
+    extra: &[PropDraw],
+    show_props: bool,
+) -> (Vec<f32>, Vec<f32>) {
+    // per-camera aerial-perspective LUT (the CPU fog prepass — the same
+    // atmosphere function the sky uses, so ground and sky share one haze)
+    let fog_lut: Arc<FogLut> = Arc::new(FogLut::build(cam.view_dir(), env.sun));
+    // single-cascade sun shadow map (objects cast; ground receives)
+    let shadow = if env.shadows && env.sun.y > 0.02 {
+        Some(build_shadow_map(scene, library, cam, env))
+    } else {
+        None
+    };
+    // water plane (drawn last, z-tested against the terrain behind it)
+    let water = env
+        .water_level
+        .map(|level| build_water_mesh(scene, level));
+
+    let props: &[PropDraw] = if show_props { extra } else { &[] };
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 16)
+        .min(h / 120.max(1));
+    let run = |frame: &mut Frame| {
+        frame.env_mode = true;
+        frame.light = env.sun;
+        frame.sun_col = env.sun_col;
+        frame.eye = cam.eye();
+        frame.env_time = env.env_time;
+        frame.contours = env.contours;
+        frame.shadow = shadow.clone();
+        frame.fog_lut = Some(fog_lut.clone());
+        frame.sky = Some(env.sky.clone());
+        draw_all(frame, scene, library, textures, cam, env_sky_bg(), props, true, water.as_ref());
+    };
+    if threads <= 1 {
+        let mut frame = Frame::new(w, h, env_sky_bg());
+        run(&mut frame);
+        return (frame.hdr, frame.depth);
+    }
+    let band = h.div_ceil(threads);
+    let mut bands: Vec<(usize, usize)> = Vec::new();
+    let mut y0 = 0usize;
+    while y0 < h {
+        let bh = band.min(h - y0);
+        bands.push((y0, bh));
+        y0 += bh;
+    }
+    let results: Vec<Frame> = std::thread::scope(|s| {
+        let handles: Vec<_> = bands
+            .iter()
+            .map(|&(yb, bh)| {
+                s.spawn(move || {
+                    let mut frame = Frame::band(w, bh, env_sky_bg(), yb, h);
+                    run(&mut frame);
+                    frame
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|hnd| hnd.join().expect("render env band thread"))
+            .collect()
+    });
+    // stitch hdr + depth bands
+    let mut hdr = vec![0f32; w * h * 3];
+    let mut depth = vec![f32::NEG_INFINITY; w * h];
+    for (row, (yb, bh)) in bands.iter().enumerate() {
+        let src = &results[row];
+        let off = yb * w * 3;
+        hdr[off..off + bh * w * 3].copy_from_slice(&src.hdr[..bh * w * 3]);
+        let off = yb * w;
+        depth[off..off + bh * w].copy_from_slice(&src.depth[..bh * w]);
+    }
+    (hdr, depth)
+}
+
+/// Neutral clear for the env path (the sky LUT overwrites sky pixels by
+/// depth, so the u8 backdrop is irrelevant here).
+fn env_sky_bg() -> [u8; 4] {
+    [0, 0, 0, 255]
+}
+
+/// Final compose for the env path (sky + tonemap; see raster::compose_env).
+#[allow(clippy::too_many_arguments)]
+fn compose(
+    hdr: &[f32],
+    depth: &[f32],
+    w: usize,
+    h: usize,
+    cam: &gdmath::OrbitCam,
+    env: &Environment,
+) -> Vec<u8> {
+    let view = cam.view();
+    let p = EnvCompose {
+        eye: cam.eye(),
+        view: &view,
+        fov: cam.fov,
+        w,
+        h,
+        sun: env.sun,
+        sky: &env.sky,
+    };
+    let mut hdr = hdr.to_vec();
+    crate::raster::compose_env(&mut hdr, depth, &p)
+}
+
+/// Single-cascade sun shadow map: an ortho fit around the camera target,
+/// depth-only raster of all road/junction/prop geometry (the ground does
+/// NOT cast — Egregoria's terrain doesn't either; it only receives).
+fn build_shadow_map(
+    scene: &Scene,
+    library: &AssetLibrary,
+    cam: &gdmath::OrbitCam,
+    env: &Environment,
+) -> Arc<ShadowData> {
+    let size = if cfg!(target_arch = "wasm32") { 512 } else { 1024 };
+    let ext = (scene.radius_m * 1.5).clamp(80.0, 900.0);
+    let sun = env.sun;
+    let up = if sun.y > 0.985 {
+        Vec3::new(0.0, 0.0, -1.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    let eye = Vec3::new(
+        cam.target.x + sun.x * ext * 3.0,
+        cam.target.y + sun.y * ext * 3.0,
+        cam.target.z + sun.z * ext * 3.0,
+    );
+    let view = Mat4::look_at(eye, cam.target, up);
+    let near = 1.0f32;
+    let far = ext * 6.0;
+    let proj = Mat4::ortho(-ext, ext, -ext, ext, near, far);
+    let mut frame = Frame::new(size, size, [0, 0, 0, 255]);
+    frame.depth_only = true;
+    for part in &scene.parts {
+        if part.positions.is_empty() {
+            continue;
+        }
+        frame.draw_mesh(
+            &part.positions,
+            &part.indices,
+            None,
+            None,
+            None,
+            &Mat4::IDENTITY,
+            &view,
+            &proj,
+            eye,
+            sun,
+            part.color,
+        );
+    }
+    for pd in &scene.props {
+        let Some(entry) = library.entries.get(pd.asset) else {
+            continue;
+        };
+        for prim in &entry.mesh.prims {
+            frame.draw_mesh(
+                &prim.positions,
+                &prim.indices,
+                None,
+                None,
+                None,
+                &pd.model,
+                &view,
+                &proj,
+                eye,
+                sun,
+                prim.color,
+            );
+        }
+    }
+    Arc::new(ShadowData {
+        size,
+        depth: frame.depth,
+        view,
+        ext,
+        near,
+        far,
+    })
+}
+
+/// The water plane: a flat grid at the sea level spanning the ground reach.
+/// Shading is fully procedural (Gerstner + TEX_WAVY + sky reflection), so
+/// the vertex grid only exists for clipping/culling granularity.
+fn build_water_mesh(scene: &Scene, level: f32) -> ScenePart {
+    let ext = (scene.ground_extent.max(scene.radius_m) * 1.35).max(120.0);
+    let n = 24usize;
+    let mut p = ScenePart {
+        positions: vec![],
+        indices: vec![],
+        color: [1.0, 1.0, 1.0, 1.0],
+        vcolors: vec![],
+        uv: vec![],
+        tex: crate::textures::TEX_WAVY,
+    };
+    for j in 0..=n {
+        for i in 0..=n {
+            let x = -ext + 2.0 * ext * i as f32 / n as f32;
+            let z = -ext + 2.0 * ext * j as f32 / n as f32;
+            p.positions.push(Vec3::new(x, level, z));
+        }
+    }
+    let stride = (n + 1) as u32;
+    for j in 0..n as u32 {
+        for i in 0..n as u32 {
+            let a = j * stride + i;
+            p.indices
+                .extend_from_slice(&[a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]);
+        }
+    }
+    p
+}
+
 /// The raster multiplies every fragment by `0.38 + 0.62 * (n·l)`; up-facing
 /// quads land on this exact factor. Colors that must render as exactly the
 /// backdrop (faded line ends, stage-disc rim) are pre-divided by it.
@@ -830,9 +1256,10 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Flat engine-terrain ground (terrain connector OFF): a soft grass fan
-/// sitting just under the roads, melting into the sky haze at the rim —
-/// the main engine's flat-map look copied into the toolkit.
+/// Flat engine-terrain ground (terrain connector OFF): a uniform GRID at
+/// y = -0.04 (R15 — the old 3-ring 96-segment fan produced wedge-shaped
+/// shading/mip stripes radiating from the origin; a grid has none). Same
+/// grass-texture + tint + rim treatment as the terrain heightfield.
 fn build_flat_grass(
     ground: &mut Vec<ScenePart>,
     radius: f32,
@@ -842,53 +1269,60 @@ fn build_flat_grass(
     let inv = 1.0 / up_shade();
     let rim = [horizon[0] * inv, horizon[1] * inv, horizon[2] * inv];
     let extent = radius * 1.6;
-    const RINGS: usize = 3;
-    const SEG: usize = 96;
-    let mut fan = ScenePart {
-        positions: vec![Vec3::new(0.0, -0.04, 0.0)],
+    let spacing = ((2.0 * extent) / 95.0).max(8.0);
+    let n = (((2.0 * extent) / spacing).floor() as usize).clamp(2, 96);
+    let step = (2.0 * extent) / n as f32;
+    let stride = n + 1;
+    let mut part = ScenePart {
+        positions: vec![],
         indices: vec![],
-        color: [GRASS_BASE[0], GRASS_BASE[1], GRASS_BASE[2], 1.0],
-        vcolors: vec![[GRASS_BASE[0], GRASS_BASE[1], GRASS_BASE[2], 1.0]],
+        color: [1.0, 1.0, 1.0, 1.0],
+        vcolors: vec![],
         uv: vec![],
-        tex: -1,
+        tex: crate::textures::TEX_TERRAIN_GRASS,
     };
-    let ring_col = |r: f32| -> [f32; 4] {
-        let f = smoothstep(0.35, 1.0, r / extent);
-        [
+    let vc = |x: f32, z: f32| -> [f32; 4] {
+        let t = (x.abs() / extent).max(z.abs() / extent);
+        // melt the outer 55% of the disc into the haze so the grid edge
+        // never shows a hard line against the sky
+        let f = smoothstep(0.45, 1.0, t);
+        grass_tint([
             GRASS_BASE[0] + (rim[0] - GRASS_BASE[0]) * f,
             GRASS_BASE[1] + (rim[1] - GRASS_BASE[1]) * f,
             GRASS_BASE[2] + (rim[2] - GRASS_BASE[2]) * f,
-            1.0,
-        ]
+        ])
     };
-    let mut ring_base: Vec<u32> = Vec::new();
-    for k in 0..RINGS {
-        let r = extent * (k + 1) as f32 / RINGS as f32;
-        let col = ring_col(r);
-        let b = fan.positions.len() as u32;
-        ring_base.push(b);
-        for s in 0..=SEG {
-            let a = s as f32 / SEG as f32 * std::f32::consts::TAU;
-            fan.positions.push(Vec3::new(a.cos() * r, -0.04, a.sin() * r));
-            fan.vcolors.push(col);
+    for j in 0..n {
+        for i in 0..n {
+            let x0 = -extent + i as f32 * step;
+            let x1 = x0 + step;
+            let z0 = -extent + j as f32 * step;
+            let z1 = z0 + step;
+            let base = part.positions.len() as u32;
+            part.positions.extend_from_slice(&[
+                Vec3::new(x0, -0.04, z0),
+                Vec3::new(x1, -0.04, z0),
+                Vec3::new(x0, -0.04, z1),
+                Vec3::new(x1, -0.04, z1),
+            ]);
+            part.uv.extend_from_slice(&[
+                [x0 / 200.0, z0 / 200.0],
+                [x1 / 200.0, z0 / 200.0],
+                [x0 / 200.0, z1 / 200.0],
+                [x1 / 200.0, z1 / 200.0],
+            ]);
+            part.vcolors.extend_from_slice(&[
+                vc(x0, z0),
+                vc(x1, z0),
+                vc(x0, z1),
+                vc(x1, z1),
+            ]);
+            part.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
         }
     }
-    // center fan out to the first ring
-    for s in 1..=SEG {
-        fan.indices
-            .extend_from_slice(&[0, ring_base[0] + s as u32 - 1, ring_base[0] + s as u32]);
-    }
-    // strips between consecutive rings
-    for k in 0..RINGS - 1 {
-        let (b0, b1) = (ring_base[k], ring_base[k + 1]);
-        for s in 0..SEG {
-            let (i0, i1) = (b0 + s as u32, b0 + s as u32 + 1);
-            let (j0, j1) = (b1 + s as u32, b1 + s as u32 + 1);
-            fan.indices.extend_from_slice(&[i0, j0, i1, i1, j0, j1]);
-        }
-    }
-    *tris += fan.indices.len() / 3;
-    ground.push(fan);
+    *tris += part.indices.len() / 3;
+    ground.push(part);
 }
 
 /// Render the scene to RGBA8 (props drawn through the asset library,
@@ -930,7 +1364,7 @@ pub fn render_scene_shaded(
         let mut frame = Frame::new(w, h, bg);
         frame.shade = shade;
         draw_all(
-            &mut frame, scene, library, textures, cam, bg, extra,
+            &mut frame, scene, library, textures, cam, bg, extra, false, None,
         );
         return frame.color;
     }
@@ -949,7 +1383,7 @@ pub fn render_scene_shaded(
                 s.spawn(move || {
                     let mut frame = Frame::band(w, bh, bg, yb, h);
                     frame.shade = shade;
-                    draw_all(&mut frame, scene, library, textures, cam, bg, extra);
+                    draw_all(&mut frame, scene, library, textures, cam, bg, extra, false, None);
                     frame
                 })
             })
@@ -1121,6 +1555,8 @@ fn paint_sky(rgba: &mut [u8], w: usize, h: usize, pitch: f32, env: Env) {
 }
 
 /// Draw every scene element into one frame (shared by the serial + band paths).
+/// R15: `env_mode` switches the Egregoria shading (analytic sun, shadows,
+/// atmosphere fog, grass ground) and draws the optional water plane last.
 #[allow(clippy::too_many_arguments)]
 fn draw_all(
     frame: &mut Frame,
@@ -1130,17 +1566,28 @@ fn draw_all(
     cam: &gdmath::OrbitCam,
     bg: [u8; 4],
     extra: &[PropDraw],
+    env_mode: bool,
+    water: Option<&ScenePart>,
 ) {
-    // distance fog measured from the CAMERA: content near the orbit target
-    // stays clear, the far roads fade into the background
-    frame.set_fog(cam.dist + scene.radius_m * 0.55, cam.dist + scene.radius_m * 3.4, bg);
+    if env_mode {
+        // the atmosphere fog LUT replaces the legacy linear blend
+        frame.fog_on = false;
+    } else {
+        // distance fog measured from the CAMERA: content near the orbit target
+        // stays clear, the far roads fade into the background
+        frame.set_fog(cam.dist + scene.radius_m * 0.55, cam.dist + scene.radius_m * 3.4, bg);
+    }
     frame.depth_range = (
         (cam.dist - scene.radius_m * 0.3).max(2.0),
         cam.dist + scene.radius_m * 3.4,
     );
     let view = cam.view();
     let proj = cam.proj(frame.w as f32 / frame.h.max(1) as f32);
-    let light = Vec3::new(0.4, 0.85, 0.3).normalized();
+    let light = if env_mode {
+        frame.light
+    } else {
+        Vec3::new(0.4, 0.85, 0.3).normalized()
+    };
     let eye = cam.eye();
 
     // R12 perf: frustum culling (Gribb–Hartmann planes from the view-proj).
@@ -1172,6 +1619,7 @@ fn draw_all(
         planes.iter().any(|pl| pl.0 * cx + pl.1 * cy + pl.2 * cz + pl.3 < -r)
     };
 
+    frame.ground_pass = env_mode;
     for part in scene.ground.iter().chain(scene.parts.iter()) {
         // coarse bounds from a strided sample (the parts are per-strip, so a
         // 1-in-12 sample bounds the sphere tightly enough to cull)
@@ -1230,6 +1678,7 @@ fn draw_all(
             part.color,
         );
     }
+    frame.ground_pass = false;
     for pd in scene.props.iter().chain(extra.iter()) {
         let Some(entry) = library.entries.get(pd.asset) else {
             continue;
@@ -1261,6 +1710,27 @@ fn draw_all(
                 prim.color,
             );
         }
+    }
+    // R15: the water plane last (z-tested against the terrain behind it —
+    // the shore fade reads the depth buffer BEFORE the water writes it)
+    if let Some(w) = water {
+        frame.water = true;
+        let tex = textures.get(w.tex);
+        let uvs = if tex.is_some() { Some(&w.uv[..]) } else { None };
+        frame.draw_mesh(
+            &w.positions,
+            &w.indices,
+            None,
+            uvs,
+            tex,
+            &Mat4::IDENTITY,
+            &view,
+            &proj,
+            eye,
+            light,
+            w.color,
+        );
+        frame.water = false;
     }
 }
 
@@ -1307,9 +1777,9 @@ mod tests {
             .any(|p| p.tex == -1 && (p.color[0] - FIN_COLORS[0][0]).abs() < 1e-4);
         assert!(green, "forward fins carry the #37d97a flat color");
 
-        // terrain enabled grows the ground (heightfield) and stays untextured.
-        // compared with the grid OFF so the (per-mode clamped) editor grid
-        // doesn't skew the raw vertex counts
+        // terrain enabled grows the ground (heightfield) and rides the
+        // grass albedo texture (Egregoria ground) — R15: BOTH grounds are
+        // the uniform grass grid now (flat 1.6r reach vs heightfield 1.2r)
         let mut terrain = roads::terrain::TerrainState::default();
         terrain.enabled = true;
         terrain.amplitude = 6.0;
@@ -1318,14 +1788,23 @@ mod tests {
         let flat_ground: usize = flat.ground.iter().map(|g| g.positions.len()).sum();
         let hilly_ground: usize = hilly.ground.iter().map(|g| g.positions.len()).sum();
         assert!(
-            hilly_ground > flat_ground,
-            "terrain heightfield must grow the ground mesh ({} vs {})",
-            hilly_ground,
-            flat_ground
+            flat_ground > 0 && hilly_ground > 0,
+            "both grounds are gridded ({} / {})",
+            flat_ground,
+            hilly_ground
         );
         assert!(
-            hilly.ground.iter().all(|g| g.tex == -1),
-            "terrain stays untextured (grid-only aesthetic)"
+            hilly.ground.iter().all(|g| g.tex == crate::textures::TEX_TERRAIN_GRASS)
+                && flat.ground.iter().all(|g| g.tex == crate::textures::TEX_TERRAIN_GRASS),
+            "ground carries the grass albedo (Egregoria ground)"
+        );
+        assert!(
+            hilly.ground_extent < flat.ground_extent,
+            "terrain heightfield reach (1.2r) < flat grid reach (1.6r)"
+        );
+        assert!(
+            hilly.sampler.is_some() && flat.sampler.is_none(),
+            "sampler rides along only with the terrain connector"
         );
         // the classic wrapper keeps the flat behavior (no terrain, no fins)
         let flat_grid = build_scene_full(&curves, &[], &[], &[], &lib, true, false, None);

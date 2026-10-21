@@ -204,6 +204,15 @@ pub struct RenderState {
     /// a preset (DSM load / launch flag) already placed the camera —
     /// suppress the automatic hero framing on the first scene build
     pub cam_seeded: bool,
+    /// R15 Egregoria environment: time of day in hours (drives the
+    /// analytic sun + the atmosphere sky/fog LUTs)
+    pub env_time_h: f64,
+    /// R15: render the single-cascade sun shadow map
+    pub env_shadows: bool,
+    /// R15: draw 10 m / 50 m elevation contour lines on the ground
+    pub env_contours: bool,
+    /// R15: show the Gerstner water plane at the scene's low watermark
+    pub env_water: bool,
 }
 
 impl Default for RenderState {
@@ -227,6 +236,10 @@ impl Default for RenderState {
             render_ms: 0.0,
             last_sig: 0,
             cam_seeded: false,
+            env_time_h: 10.0,
+            env_shadows: true,
+            env_contours: true,
+            env_water: false,
         }
     }
 }
@@ -530,6 +543,7 @@ impl RoadkitApp {
             app.load_dsm_at(sx, sz);
             if cfg.dsm_radius > 0.0 {
                 app.cam.dist = cfg.dsm_radius;
+                app.cam.sync_targets();
             }
         } else if cfg.dsm {
             app.load_dsm();
@@ -537,6 +551,7 @@ impl RoadkitApp {
             // load_dsm — it aims at the post-recenter site position)
             if cfg.dsm_radius > 0.0 {
                 app.cam.dist = cfg.dsm_radius;
+                app.cam.sync_targets();
             }
         }
         // seed the undo history with the freshly built demo scene (the
@@ -775,6 +790,7 @@ impl RoadkitApp {
         self.cam.dist = (span * 1.35).clamp(30.0, 20_000.0) as f32;
         self.cam.pitch = 0.52;
         self.cam.yaw = 0.65;
+        self.cam.sync_targets();
         self.plan.cx = cx;
         self.plan.cz = cz;
         // plan scale: fit ~90% of a 900px viewport
@@ -899,6 +915,7 @@ impl RoadkitApp {
         self.cam.dist = if closeup { 430.0 } else { 620.0 };
         self.cam.pitch = if closeup { 0.5 } else { 0.62 };
         self.cam.yaw = 0.65;
+        self.cam.sync_targets();
         self.plan.cx = 0.0;
         self.plan.cz = 0.0;
         self.plan.scale = if closeup { 0.8 } else { 0.55 };
@@ -1190,6 +1207,7 @@ impl RoadkitApp {
             self.cam.pitch = pitch as f32;
             self.cam.dist = dist as f32;
             self.cam.target = gdmath::Vec3::new(tx as f32, 0.0, tz as f32);
+            self.cam.sync_targets();
             self.plan.cx = tx;
             self.plan.cz = tz;
         }
@@ -1742,11 +1760,15 @@ impl eframe::App for RoadkitApp {
         }
         self.last_t = now;
 
-        // smooth zoom (Google-Maps feel): consume + decay the wheel velocity
-        if self.cam.zoom_vel.abs() > 0.01 {
-            let k = (self.cam.zoom_vel * 0.16).clamp(-self.cam.dist * 0.28, self.cam.dist * 0.28);
-            self.cam.dist = (self.cam.dist + k).clamp(4.0, 60_000.0);
-            self.cam.zoom_vel *= 0.82;
+        // R15 Egregoria camera feel: the pose follows its targets with
+        // exponential damping (lerpp! amounts: yaw 16, pitch 8, dist 8).
+        // Programmatic moves call sync_targets(), so targets == pose at
+        // rest and this only runs while a gesture is settling.
+        if self.cam.target_yaw != self.cam.yaw
+            || self.cam.target_pitch != self.cam.pitch
+            || self.cam.target_dist != self.cam.dist
+        {
+            self.cam.update(dt.max(1.0 / 120.0));
             self.render.dirty = true;
             ctx.request_repaint();
         }

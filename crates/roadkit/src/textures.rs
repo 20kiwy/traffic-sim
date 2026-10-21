@@ -3,8 +3,9 @@
 //! The road trim sheet is FETCHED from godot-road-generator
 //! (`resources/road_texture@2x.png` → road_trim.raw), the rest are
 //! generated procedural textures (grass / sidewalk / median / asphalt,
-//! plus the R7 set: cement / mud / rough / red_tactile — regenerated via
-//! `assets/textures_src/gen_cement_mud_rough.py`).
+//! the R7 set: cement / mud / rough / red_tactile via
+//! `assets/textures_src/gen_cement_mud_rough.py`, and the R15 environment
+//! set: terrain_grass / wavy via `assets/textures_src/gen_env_textures.py`).
 //! Decoding PNGs at runtime would need an inflate crate; the conversion
 //! happens once at build time instead.
 
@@ -162,6 +163,11 @@ pub const TEX_WINDOWS: i32 = 16;
 pub const TEX_RA_CONCRETE2: i32 = 17;
 pub const TEX_RA_CONCRETE3: i32 = 18;
 pub const TEX_RA_DIRT: i32 = 19;
+// R15 environment set (converted by assets/textures_src/gen_env_textures.py).
+// NOTE: TEX_GRASS (1) is the R6 roadside grass baked into road/junction mesh
+// parts — the terrain ground albedo gets its own slot and name.
+pub const TEX_TERRAIN_GRASS: i32 = 20;
+pub const TEX_WAVY: i32 = 21;
 
 #[derive(Default)]
 pub struct TextureLibrary {
@@ -180,6 +186,8 @@ impl TextureLibrary {
             "ra_railing", "ra_brick", "ra_cobble", "windows",
             // RoadArchitect set (R12)
             "ra_concrete2", "ra_concrete3", "ra_dirt",
+            // R15 environment set (terrain ground + water noise)
+            "terrain_grass", "wavy",
         ];
         let mut lib = Self::default();
         for name in names {
@@ -212,7 +220,7 @@ impl TextureLibrary {
     /// road mesh texture slots stay valid.
     #[cfg(target_arch = "wasm32")]
     pub fn load_embedded() -> Self {
-        const NAMES: [&str; 20] = [
+        const NAMES: [&str; 22] = [
             "road_trim", "grass", "sidewalk", "median", "asphalt",
             "cement", "mud", "rough", "red_tactile",
             // RoadArchitect set (R11)
@@ -220,8 +228,10 @@ impl TextureLibrary {
             "ra_railing", "ra_brick", "ra_cobble", "windows",
             // RoadArchitect set (R12)
             "ra_concrete2", "ra_concrete3", "ra_dirt",
+            // R15 environment set (terrain ground + water noise)
+            "terrain_grass", "wavy",
         ];
-        const BYTES: [&[u8]; 20] = [
+        const BYTES: [&[u8]; 22] = [
             include_bytes!("../../../assets/textures/road_trim.raw"),
             include_bytes!("../../../assets/textures/grass.raw"),
             include_bytes!("../../../assets/textures/sidewalk.raw"),
@@ -242,6 +252,8 @@ impl TextureLibrary {
             include_bytes!("../../../assets/textures/ra_concrete2.raw"),
             include_bytes!("../../../assets/textures/ra_concrete3.raw"),
             include_bytes!("../../../assets/textures/ra_dirt.raw"),
+            include_bytes!("../../../assets/textures/terrain_grass.raw"),
+            include_bytes!("../../../assets/textures/wavy.raw"),
         ];
         let mut lib = Self::default();
         for (name, bytes) in NAMES.iter().zip(BYTES.iter()) {
@@ -259,5 +271,42 @@ impl TextureLibrary {
     /// Number of texture slots (loaded + fallbacks), for the UI.
     pub fn slot_count(&self) -> usize {
         self.entries.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fixed slot set (road_trim .. TEX_WAVY) must load completely from
+    /// the repo's assets dir — a missing/malformed .raw silently degrades to
+    /// a 1x1 gray fallback, so assert real dimensions here.
+    #[test]
+    fn standard_set_loads_all_22_slots() {
+        let lib = TextureLibrary::load_dir(Path::new("../../assets/textures"));
+        assert_eq!(lib.slot_count(), 22, "TEX_ROAD_TRIM(0)..TEX_WAVY(21)");
+        for slot in 0..22 {
+            let t = lib.get(slot).unwrap_or_else(|| panic!("slot {slot} missing"));
+            assert!(t.w > 1 && t.h > 1, "slot {slot} fell back to 1x1");
+            assert!(!t.mips.is_empty(), "slot {slot} has no mip pyramid");
+        }
+        // R15 environment set specifics
+        let grass = lib.get(TEX_TERRAIN_GRASS).unwrap();
+        assert_eq!((grass.w, grass.h), (256, 256), "terrain_grass.raw");
+        let wavy = lib.get(TEX_WAVY).unwrap();
+        assert_eq!((wavy.w, wavy.h), (128, 128), "wavy.raw");
+        // wavy must be mid-gray centered (~0.5 per channel) so sampling RGB
+        // yields zero-mean offsets for water normal perturbation
+        let mut mean = [0.0f64; 3];
+        for px in wavy.data.chunks_exact(4) {
+            for c in 0..3 {
+                mean[c] += px[c] as f64;
+            }
+        }
+        let n = (wavy.w * wavy.h) as f64;
+        for c in 0..3 {
+            let m = mean[c] / n / 255.0;
+            assert!((m - 0.5).abs() < 0.02, "wavy channel {c} mean {m:.3} != ~0.5");
+        }
     }
 }

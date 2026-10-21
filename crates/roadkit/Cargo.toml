@@ -8,6 +8,7 @@ license.workspace = true
 gdmath = { workspace = true }
 gdscript = { workspace = true }
 roads = { workspace = true }
+engine = { workspace = true }
 simflow = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }

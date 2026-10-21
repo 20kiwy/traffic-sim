@@ -128,6 +128,7 @@ impl CameraShot {
             dist: self.dist as f32,
             yaw: self.yaw as f32,
             pitch: self.pitch as f32,
+            ..Default::default()
         }
     }
 }

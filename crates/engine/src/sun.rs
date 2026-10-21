@@ -14,6 +14,13 @@ pub const HOUR: f64 = 3600.0;
 /// The hour the day starts at (egregoria starts day 1 at 8:00).
 pub const DAY_START_H: f64 = 8.0;
 
+/// Direction of the sun at `time_of_day` seconds, in the Y-up frame — the
+/// exact same conversion as [`sun_dir`], named for symmetry with the
+/// `*_yup` atmosphere API (`atmosphere_yup`, `SkyLut::sample`, ...).
+pub fn sun_dir_yup(time_of_day: f64) -> Vec3 {
+    sun_dir(time_of_day)
+}
+
 /// Direction of the sun at `time_of_day` seconds.
 ///
 /// Port of egregoria:
@@ -54,6 +61,17 @@ pub fn sun_light_flat(time_of_day: f64) -> [f32; 4] {
     [clamp(c[0]), clamp(c[1]), clamp(c[2]), 1.0]
 }
 
+/// Lambert shade for an UP-FACING normal given the light direction's Y
+/// component (the sun's height above the horizon): `0.38 + 0.62 * max(y, 0)`.
+///
+/// This matches the software rasterizer's (`roadkit` `raster.rs`) Lambert
+/// formula for its mostly-up-facing ground/road quads, exposed here so the
+/// environment code and the rasterizer share one definition of the ambient
+/// floor.
+pub fn up_shade(light_y: f32) -> f32 {
+    0.38 + 0.62 * light_y.max(0.0)
+}
+
 /// Shadow map quality ladder copied from egregoria's `ShadowQuality`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ShadowQuality {
@@ -90,6 +108,12 @@ pub struct SunState {
 }
 
 impl SunState {
+    /// A fixed mid-morning state (10:00) — handy for previews/tests that
+    /// want a well-lit, deterministic sun without threading game time.
+    pub fn day() -> Self {
+        Self::at(10.0 * HOUR)
+    }
+
     pub fn at(time_of_day: f64) -> Self {
         let dir = sun_dir(time_of_day);
         SunState {

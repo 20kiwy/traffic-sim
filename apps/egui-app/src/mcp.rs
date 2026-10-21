@@ -178,6 +178,7 @@ fn fit_cam(curves: &[roads::model::RoadCurve], w: usize, h: usize) -> OrbitCam {
     cam.dist = (span * 1.45).clamp(30.0, 20_000.0) as f32;
     cam.pitch = 0.52;
     cam.yaw = 0.65;
+    cam.sync_targets();
     // approximate viewport-based framing distance correction
     let aspect = (w as f32 / h.max(1) as f32).clamp(0.5, 3.0);
     cam.dist *= 1.0 / aspect.min(1.0).max(0.6);
@@ -366,9 +367,11 @@ fn call_tool(sess: &mut Session, name: &str, args: &Value) -> Result<Value, Stri
             ) {
                 cam.yaw = y as f32;
                 cam.pitch = p as f32;
+                cam.sync_targets();
             }
             if let Some(d) = args.get("dist").and_then(|v| v.as_f64()) {
                 cam.dist = (d as f32).max(4.0);
+                cam.sync_targets();
             }
             if let (Some(fx), Some(fz)) = (
                 args.get("focus_x").and_then(|v| v.as_f64()),
@@ -377,6 +380,7 @@ fn call_tool(sess: &mut Session, name: &str, args: &Value) -> Result<Value, Stri
                 let r = args.get("focus_r").and_then(|v| v.as_f64()).unwrap_or(40.0);
                 cam.target = Vec3::new(fx as f32, 0.0, fz as f32);
                 cam.dist = (r * 2.4).clamp(10.0, 40_000.0) as f32;
+                cam.sync_targets();
             }
             let sim = args.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let density = args.get("density").and_then(|v| v.as_f64()).unwrap_or(14.0);
@@ -759,6 +763,7 @@ fn plan_rgba(world: &HeadWorld<'_>, zoom: f32, w: usize, h: usize) -> Vec<u8> {
     let mut cam = fit_cam(&world.scene.curves, w, h);
     cam.pitch = 1.45; // nearly straight down
     cam.dist *= 1.15;
+    cam.sync_targets();
     let _ = zoom;
     render_world(world, &cam, w, h, 0.0, 14.0)
 }

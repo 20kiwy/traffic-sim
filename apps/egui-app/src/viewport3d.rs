@@ -170,6 +170,42 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     app.render.dirty = true;
                 }
 
+                ui.separator();
+                // R15 Egregoria environment: analytic sun clock + shadows
+                // + contour lines + Gerstner water
+                if ui
+                    .add(
+                        egui::Slider::new(&mut app.render.env_time_h, 5.0..=21.0)
+                            .integer()
+                            .text("sun"),
+                    )
+                    .on_hover_text("Time of day — drives the analytic sun, the atmosphere sky and the fog (Egregoria day model)")
+                    .changed()
+                {
+                    app.render.dirty = true;
+                }
+                if ui
+                    .toggle_value(&mut app.render.env_shadows, "shadows")
+                    .on_hover_text("Sun shadow map (Egregoria cascaded-shadow look)")
+                    .changed()
+                {
+                    app.render.dirty = true;
+                }
+                if ui
+                    .toggle_value(&mut app.render.env_contours, "contours")
+                    .on_hover_text("10 m / 50 m elevation contour lines on the ground")
+                    .changed()
+                {
+                    app.render.dirty = true;
+                }
+                if ui
+                    .toggle_value(&mut app.render.env_water, "water")
+                    .on_hover_text("Gerstner water plane at the scene's low watermark (Egregoria water)")
+                    .changed()
+                {
+                    app.render.dirty = true;
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new("LMB orbit · wheel zoom · RMB pan · F fit").size(10.5).color(t.text_dim));
                 });
@@ -209,10 +245,19 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
 
             if app.render.spin {
                 app.cam.yaw += 0.006;
+                app.cam.target_yaw = app.cam.yaw; // spin is a direct pose move
             }
 
-            // engine day environment: pale haze fog + zenith sky (yakui-app look)
-            let env = roadkit::ENV_DAY;
+            // R15 Egregoria environment: analytic sun (time of day),
+            // atmosphere sky + fog LUTs, sun shadows, grass ground, optional
+            // water plane and contour lines — replaces the flat ENV_DAY look.
+            let water_level = if app.render.env_water { water_level_for(&scene) } else { None };
+            let env = roadkit::scene::Environment::new(
+                app.render.env_time_h * 3600.0,
+                app.render.env_shadows,
+                app.render.env_contours,
+                water_level,
+            );
             // traffic sim: advance one frame step and render its vehicles.
             // Two engines: the classic per-intersection TrafficSim and the
             // lane-graph simflow (FlowSim) — the toolbar toggles choose.
@@ -312,14 +357,14 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     // props hidden: render without prop draws (no scene clone)
                     &scene
                 };
-                rgba = roadkit::render_scene_props_env_shaded(
+                rgba = roadkit::scene::render_env_props_shaded(
                     target,
                     &app.assets,
                     &app.textures,
                     &app.cam,
                     rw,
                     rh,
-                    env,
+                    &env,
                     &extra,
                     app.render.show_props,
                     app.render.shading,
@@ -458,20 +503,26 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     let k = app.cam.dist * 0.0016;
                     app.cam.target = app.cam.target - right * (d.x * k) + up * (d.y * k);
                 } else {
-                    app.cam.yaw += d.x * 0.008;
-                    app.cam.pitch = (app.cam.pitch + d.y * 0.006).clamp(-0.1, 1.45);
+                    // Egregoria orbit: gestures move the TARGET pose; the
+                    // pose follows with exponential damping (update() in
+                    // the app update loop)
+                    app.cam.target_yaw += d.x * 0.008;
+                    app.cam.target_pitch = (app.cam.target_pitch + d.y * 0.006).clamp(-0.1, 1.5607);
                 }
+                app.render.dirty = true;
             }
             if response.hovered() {
                 let scroll = ctx.input(|i| i.raw_scroll_delta.y);
                 if scroll != 0.0 {
-                    // Google-Maps-style exponential zoom (smooth, cursor
-                    // anchored via the orbit target retention)
-                    app.cam.zoom_vel += scroll * 0.045;
+                    // Egregoria wheel zoom: targetdist *= (1/1.05)^(0.5+0.1|w|)
+                    let wheel = scroll.signum() * (scroll.abs() / 30.0).clamp(1.0, 8.0);
+                    app.cam.zoom_wheel(wheel);
+                    app.render.dirty = true;
                 }
                 // double-click zooms in one step toward the view center
                 if response.double_clicked() {
-                    app.cam.zoom_vel -= 260.0;
+                    app.cam.target_dist = (app.cam.target_dist * 0.6).clamp(5.0, 1500.0);
+                    app.render.dirty = true;
                 }
                 // arrow keys / WASD pan the target in the view plane
                 let (mut ax, mut ay) = (0.0f32, 0.0f32);
@@ -589,10 +640,35 @@ fn frame_sig(app: &RoadkitApp, w: usize, h: usize, extra: usize) -> u64 {
     app.render.show_points.hash(&mut hsh);
     app.render.shading.hash(&mut hsh);
     app.render.flow_on.hash(&mut hsh);
+    // R15 environment state (sun time, shadows, contours, water)
+    app.render.env_time_h.to_bits().hash(&mut hsh);
+    app.render.env_shadows.hash(&mut hsh);
+    app.render.env_contours.hash(&mut hsh);
+    app.render.env_water.hash(&mut hsh);
     w.hash(&mut hsh);
     h.hash(&mut hsh);
     extra.hash(&mut hsh);
     hsh.finish()
+}
+
+/// Low watermark of the ground — the water plane level when the water
+/// toggle is on (1.2 m below the lowest sampled ground height).
+fn water_level_for(scene: &roadkit::scene::Scene) -> Option<f32> {
+    let s = scene.sampler.as_ref()?;
+    let ext = scene.ground_extent.max(scene.radius_m) * 0.9;
+    let mut mn = f32::INFINITY;
+    for j in 0..12 {
+        for i in 0..12 {
+            let x = -ext + 2.0 * ext * i as f32 / 11.0;
+            let z = -ext + 2.0 * ext * j as f32 / 11.0;
+            mn = mn.min(s.height(x, z));
+        }
+    }
+    if mn.is_finite() {
+        Some(mn - 1.2)
+    } else {
+        None
+    }
 }
 
 #[allow(dead_code)]
@@ -655,8 +731,8 @@ fn draw_nav_cluster(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, _resp
             if s.contains(pos) { pan(app, 0.0, 1.0); }
             if w.contains(pos) { pan(app, -1.0, 0.0); }
             if e.contains(pos) { pan(app, 1.0, 0.0); }
-            if zi.contains(pos) { app.cam.zoom_vel -= 60.0; }
-            if zo.contains(pos) { app.cam.zoom_vel += 60.0; }
+            if zi.contains(pos) { app.cam.target_dist = (app.cam.target_dist * 0.8).clamp(5.0, 1500.0); app.render.dirty = true; }
+            if zo.contains(pos) { app.cam.target_dist = (app.cam.target_dist * 1.25).clamp(5.0, 1500.0); app.render.dirty = true; }
         }
     }
     let _ = &mut pan;
@@ -809,8 +885,8 @@ fn draw_axis_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, respon
         if let Some(p) = response.interact_pointer_pos() {
             let mut hit: Option<&AxisEntry> = None;
             if ((p.x - center.x).powi(2) + (p.y - center.y).powi(2)).sqrt() <= 7.0 {
-                app.cam.yaw = 0.55;
-                app.cam.pitch = 0.55;
+                app.cam.target_yaw = 0.55;
+                app.cam.target_pitch = 0.55;
             } else {
                 for e in entries.iter() {
                     let q = axis_pos(e.axis);
@@ -822,15 +898,16 @@ fn draw_axis_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, respon
                 if let Some(e) = hit {
                     match e.snap {
                         Some((yaw, pitch)) => {
-                            app.cam.yaw = yaw;
-                            app.cam.pitch = pitch;
+                            app.cam.target_yaw = yaw;
+                            app.cam.target_pitch = pitch;
                         }
                         None => {
                             // +Y / -Y: top / bottom view (keep the yaw)
                             let top = e.axis.y > 0.0;
-                            app.cam.pitch = if top { 1.5 } else { -1.5 };
+                            app.cam.target_pitch = if top { 1.5 } else { -1.5 };
                         }
                     }
+                    app.render.dirty = true;
                 }
             }
         }
