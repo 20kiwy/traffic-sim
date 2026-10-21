@@ -307,7 +307,7 @@ fn tools_json() -> Vec<Value> {
         json!({"name":"list_demos","description":"List bundled demo scripts","inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"get_scene","description":"Full scene JSON: curves, points (lanes/median/dirt...), junctions, props, stats","inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"get_state","description":"Editor state: tab, tool, open panels, selection, status, stats","inputSchema":{"type":"object","properties":{}}}),
-        json!({"name":"render_3d","description":"Render the 3D scene to PNG (headless software renderer). Optional camera control or focus area, optional traffic sim","inputSchema":{"type":"object","properties":{"out":{"type":"string","description":"png path"},"source":{"type":"string","description":"optional .gd source (defaults to the session scene's script)"},"width":{"type":"integer"},"height":{"type":"integer"},"yaw":{"type":"number"},"pitch":{"type":"number"},"dist":{"type":"number"},"focus_x":{"type":"number"},"focus_z":{"type":"number"},"focus_r":{"type":"number"},"sim_seconds":{"type":"number"},"density":{"type":"number"}},"required":["out"]}}),
+        json!({"name":"render_3d","description":"Render the 3D scene to PNG (headless software renderer). Optional camera control or focus area, optional traffic sim","inputSchema":{"type":"object","properties":{"out":{"type":"string","description":"png path"},"source":{"type":"string","description":"optional .gd source (defaults to the session scene's script)"},"width":{"type":"integer"},"height":{"type":"integer"},"yaw":{"type":"number"},"pitch":{"type":"number"},"dist":{"type":"number"},"focus_x":{"type":"number"},"focus_z":{"type":"number"},"focus_r":{"type":"number"},"sim_seconds":{"type":"number"},"density":{"type":"number"},"atmo":{"type":"boolean","description":"true = Egregoria atmosphere (sky/fog). Default false = the app's editor look (flat backdrop + grid)"}},"required":["out"]}}),
         json!({"name":"render_plan","description":"Render the 2D plan (top-down blueprint) to PNG","inputSchema":{"type":"object","properties":{"out":{"type":"string"},"source":{"type":"string"},"width":{"type":"integer"},"height":{"type":"integer"},"zoom":{"type":"number"}},"required":["out"]}}),
         json!({"name":"list_actions","description":"Every registered UI action (id, label, location, hotkey) — the full button map","inputSchema":{"type":"object","properties":{}}}),
         json!({"name":"do_action","description":"Execute a UI action headlessly (same implementation as the button) and get a state diff","inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}),
@@ -384,7 +384,7 @@ fn call_tool(sess: &mut Session, name: &str, args: &Value) -> Result<Value, Stri
             }
             let sim = args.get("sim_seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let density = args.get("density").and_then(|v| v.as_f64()).unwrap_or(14.0);
-            let rgba = render_world(&world, &cam, w, h, sim, density);
+            let rgba = render_world(&world, &cam, w, h, sim, density, args.get("atmo").and_then(|v| v.as_bool()));
             write_png(std::path::Path::new(out), &rgba, w as u32, h as u32)?;
             let veh = if sim > 0.0 {
                 json!(format!("traffic sim {:.1}s @ {density} veh/km", sim))
@@ -740,6 +740,7 @@ fn render_world(
     h: usize,
     sim_seconds: f64,
     density: f64,
+    atmo: Option<bool>,
 ) -> Vec<u8> {
     let mut props = world.scene.props.clone();
     if sim_seconds > 0.0 {
@@ -754,7 +755,43 @@ fn render_world(
         props.extend(sim.prop_instances(&world.scene.curves));
     }
     let scene = roadkit::build_scene(&world.scene.curves, &world.scene.junctions, &props, &world.library, true);
-    roadkit::render_scene(&scene, &world.library, &world.textures, cam, w, h, [26, 28, 32, 255], &[])
+    // R16: headless renders follow the app's EDITOR look by default —
+    // flat theme backdrop + unlit floor, no sky/fog ("no whitish cloud, no
+    // green background, full grid"). ROADKIT_ATMO=1 or the render_3d
+    // "atmo" flag opts into the Egregoria atmosphere instead.
+    let mut env = roadkit::scene::Environment::from_env();
+    if std::env::var("ROADKIT_ATMO").is_err() {
+        env.atmo = false; // env var not set → editor default (app parity)
+    }
+    if let Some(a) = atmo {
+        env.atmo = a; // per-call override wins
+    }
+    roadkit::scene::render_env_shaded(
+        &scene,
+        &world.library,
+        &world.textures,
+        cam,
+        w,
+        h,
+        &env,
+        &[],
+        true,
+        shade_mode_from_env(),
+    )
+}
+
+/// Viewport shading for headless renders: `ROADKIT_SHADE` (solid | normals |
+/// wire | shadedwire | depth | quality) — the same contract as roadkit-cli
+/// (docs/ROADARCHITECT.md §10 Blender-style modes).
+fn shade_mode_from_env() -> roadkit::raster::ShadeMode {
+    match std::env::var("ROADKIT_SHADE").unwrap_or_default().to_lowercase().as_str() {
+        "normals" => roadkit::raster::ShadeMode::Normals,
+        "wire" | "wireframe" => roadkit::raster::ShadeMode::Wireframe,
+        "shadedwire" | "shaded_wire" | "shaded+w" => roadkit::raster::ShadeMode::ShadedWire,
+        "depth" => roadkit::raster::ShadeMode::Depth,
+        "quality" => roadkit::raster::ShadeMode::Quality,
+        _ => roadkit::raster::ShadeMode::Solid,
+    }
 }
 
 fn plan_rgba(world: &HeadWorld<'_>, zoom: f32, w: usize, h: usize) -> Vec<u8> {
@@ -765,7 +802,7 @@ fn plan_rgba(world: &HeadWorld<'_>, zoom: f32, w: usize, h: usize) -> Vec<u8> {
     cam.dist *= 1.15;
     cam.sync_targets();
     let _ = zoom;
-    render_world(world, &cam, w, h, 0.0, 14.0)
+    render_world(world, &cam, w, h, 0.0, 14.0, None)
 }
 
 /* ================================================================== */
@@ -901,9 +938,13 @@ pub fn uitest() -> i32 {
         Ok(w) if !w.scene.curves.is_empty() => {
             let cam = fit_cam(&w.scene.curves, 640, 360);
             let t0 = std::time::Instant::now();
-            let rgba = render_world(&w, &cam, 640, 360, 0.0, 14.0);
+            let rgba = render_world(&w, &cam, 640, 360, 0.0, 14.0, None);
             let ms = t0.elapsed().as_secs_f32() * 1000.0;
-            let nonbg = rgba.chunks_exact(4).filter(|p| p[0] != 26 || p[1] != 28 || p[2] != 32).count();
+            // painted = differs from BOTH the legacy backdrop [26,28,32] and
+            // the R16 editor backdrop (ENV_DAY clear [186,192,196])
+            let nonbg = rgba.chunks_exact(4).filter(|p| {
+                (p[0] != 26 || p[1] != 28 || p[2] != 32) && (p[0] != 186 || p[1] != 192 || p[2] != 196)
+            }).count();
             if nonbg > 1000 {
                 pass += 1;
                 println!("PASS  render_3d 640x360 — {nonbg} painted px in {ms:.1} ms (parallel raster)");
