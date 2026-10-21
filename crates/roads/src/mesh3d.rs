@@ -477,10 +477,12 @@ fn sweep_profile(curve: &RoadCurve, q: &MeshQuality) -> Sweep {
     }
 }
 
-/// Active gutter width at a sample (0 when skipped: unpaved sample or
-/// `gutter_profile.0 <= 0` — the emitters drop collapsed quads).
+/// Active gutter width at a sample (0 when skipped: unpaved sample,
+/// `gutter_profile.0 <= 0`, or an ELEVATED sample — R14: bridge decks
+/// carry parapets, not drain aprons; the V-gutter made the deck read as a
+/// wide concrete slab instead of a road on a bridge).
 fn gutter_w_at(sw: &Sweep, i: usize) -> f64 {
-    if sw.unpaved[i] || sw.gut_w[i] <= 1e-4 {
+    if sw.unpaved[i] || sw.gut_w[i] <= 1e-4 || sw.elev[i] > 0.5 {
         0.0
     } else {
         sw.gut_w[i]

@@ -104,7 +104,10 @@ impl Default for JunctionSettings {
             auto_roundabout: true,
             island_radius: 5.0,
             enabled: true,
-            use_prefabs: true,
+            // R14: RA-faithful intersections are procedural patches using
+            // the road's own material — the WFC GLB tiles rendered dark and
+            // mismatched. The control-bar "prefabs" toggle re-enables them.
+            use_prefabs: false,
             prefabs_manual: false,
         }
     }
@@ -422,12 +425,22 @@ pub fn detect(curves: &[RoadCurve], s: &JunctionSettings) -> Vec<Junction> {
     }
 
     // ---- 4. merge nearby candidates (crossing at an endpoint etc.) --
+    // R14: the radius grows with the legs' carriageway widths, so an
+    // interchange cluster (ramp mouths beside dual carriageways) folds into
+    // ONE multi-leg intersection instead of several overlapping pads.
     let merge_r = (s.snap_m * 1.5).max(6.0);
+    let span_r = |lgs: &[JunctionLeg]| -> f64 {
+        lgs.iter()
+            .map(|l| l.half_width)
+            .fold(0.0f64, f64::max)
+            * 1.6
+    };
     let mut merged: Vec<Candidate> = Vec::new();
     for c in candidates {
         let mut hit: Option<usize> = None;
         for (mi, m) in merged.iter().enumerate() {
-            if (m.x - c.x).hypot(m.z - c.z) <= merge_r {
+            let pair_r = merge_r.max(span_r(&m.legs) + span_r(&c.legs));
+            if (m.x - c.x).hypot(m.z - c.z) <= pair_r {
                 hit = Some(mi);
                 break;
             }
@@ -458,25 +471,69 @@ pub fn detect(curves: &[RoadCurve], s: &JunctionSettings) -> Vec<Junction> {
         // like the plugin: prefab roundabouts sit where roads terminate;
         // through crossings stay n-gon intersections (IntersectionNGon).
         let any_through = c.legs.iter().any(|l| !l.is_end);
-        let kind = if s.auto_roundabout && c.legs.len() >= 3 && !any_through {
+        let mut kind = if s.auto_roundabout && c.legs.len() >= 3 && !any_through {
             JunctionKind::Roundabout
         } else {
             JunctionKind::Crossing
         };
+        // R14: a roundabout never forms UNDER a flyover — when another
+        // curve's body (not a leg) passes overhead within the ring reach,
+        // keep the at-grade Crossing. Grade-separated interchanges used to
+        // collapse into rings clipped by the deck above.
+        if kind == JunctionKind::Roundabout {
+            let reach = s.island_radius + (max_half * 2.2).max(7.0) + 6.0;
+            'deck: for (fi, f) in flats.iter().enumerate() {
+                if c.legs.iter().any(|l| l.curve == fi) {
+                    continue;
+                }
+                for (pt, &ev) in f.pts.iter().zip(&f.elevs) {
+                    if ev > 2.5 && (pt.x - c.x).hypot(pt.y - c.z) < reach {
+                        kind = JunctionKind::Crossing;
+                        break 'deck;
+                    }
+                }
+            }
+        }
         let mut legs = c.legs.clone();
         legs.sort_by(|a, b| {
             let aa = atan2f(a.out_dir.1, a.out_dir.0);
             let bb = atan2f(b.out_dir.1, b.out_dir.0);
             aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
         });
+        // R14: drop duplicate legs — the same curve passing through the
+        // cluster twice in the SAME direction half (looping slip roads)
+        // painted double stop lines / zebra bars. Through legs of one curve
+        // (opposite directions, the two halves of a crossing) stay; legs of
+        // DIFFERENT curves never dedupe (dual carriageways run parallel on
+        // purpose). Keep the wider leg of each duplicate pair.
+        let mut dedup: Vec<JunctionLeg> = Vec::with_capacity(legs.len());
+        for l in legs {
+            let dup = dedup.iter_mut().find(|k| {
+                k.curve == l.curve
+                    && k.is_end == l.is_end
+                    && k.end == l.end
+                    && (k.out_dir.0 * l.out_dir.0 + k.out_dir.1 * l.out_dir.1 > 0.0)
+            });
+            match dup {
+                Some(k) => {
+                    if l.half_width > k.half_width {
+                        *k = l;
+                    }
+                }
+                None => dedup.push(l),
+            }
+        }
+        legs = dedup;
         let (outline, island, ring_outer) = match kind {
             JunctionKind::Crossing => {
                 // GRG IntersectionNGon fan: per leg two corners at the stop
                 // line, connected in angular order -> the classic n-gon.
-                let stop = (max_half * 1.4 + 1.0).max(3.0);
+                // R14: the stop distance is PER LEG (narrow slip roads no
+                // longer push the whole outline out of scale) and clamped.
                 let mut outline = Vec::with_capacity(legs.len() * 2);
                 for l in &legs {
                     let px = leg_perp(l.out_dir);
+                    let stop = leg_stop_m(l);
                     let fx = c.x + l.out_dir.0 * stop;
                     let fz = c.z + l.out_dir.1 * stop;
                     outline.push((fx - px.0 * l.half_width, fz - px.1 * l.half_width));
@@ -576,7 +633,7 @@ use gdmath::vec3::Vec3;
 /// plain-asphalt tile (planar UVs), islands with grass. Rendered above
 /// the road strips (higher y).
 pub fn mesh_parts(j: &Junction) -> Vec<MeshPart> {
-    mesh_parts_dirt(j, false, surface::ASPHALT, 0.0)
+    mesh_parts_dirt(j, &[], false, surface::ASPHALT, 0.0)
 }
 
 /// Painted markings only (zebra + stop lines for crossings, dashed
@@ -591,7 +648,7 @@ pub fn marking_parts_for(j: &Junction, curves: &[RoadCurve]) -> Vec<MeshPart> {
     if legs_unpaved(j, curves) {
         return Vec::new();
     }
-    crosswalk_parts(j, junction_elev(j, curves))
+    crosswalk_parts(j, curves, junction_elev(j, curves))
 }
 
 /// Dirt/surface-aware variant: when any touching curve is an unpaved
@@ -607,18 +664,27 @@ pub fn mesh_parts_for(j: &Junction, curves: &[RoadCurve]) -> Vec<MeshPart> {
             .map(|p| p.dirt)
             .unwrap_or(false)
     });
-    mesh_parts_dirt(j, dirt, junction_surface(j, curves), junction_elev(j, curves))
+    mesh_parts_dirt(j, curves, dirt, junction_surface(j, curves), junction_elev(j, curves))
 }
 
-fn mesh_parts_dirt(j: &Junction, dirt: bool, surf: u8, elev: f32) -> Vec<MeshPart> {
+fn mesh_parts_dirt(j: &Junction, curves: &[RoadCurve], dirt: bool, surf: u8, elev: f32) -> Vec<MeshPart> {
     let mut parts = Vec::new();
-    // patch texture: mud when dirt, else the dominant surface (ASPHALT →
-    // TEX_ASPHALT, CEMENT/CONCRETE → TEX_CEMENT, COBBLE → darker asphalt
-    // fallback, GRAVEL → TEX_ROUGH, MUD → TEX_MUD)
-    let (tex, tint) = if dirt {
-        (crate::mesh3d::TEX_MUD, crate::mesh3d::MUD_TINT)
+    // Patch texture — R14 RA-faithful: a paved intersection carries the
+    // SAME road material as its legs (RoadArchitect builds intersections
+    // from the road workflow's own material, never a second pavement), so
+    // paved patches sample the trim sheet's PLAIN column (COL_PLAIN = flat
+    // asphalt, no baked markings) with ROAD_TINT and a ~14 m tile density
+    // matching the lane strips (single_uv_height = lane_width × 4). The
+    // old raw TEX_ASPHALT pad read as a different pavement — the visible
+    // "texture between the road and the intersection" mismatch. Dirt
+    // junctions stay mud; gravel-dominant ones stay rough.
+    let (tex, tint, trim_plain) = if dirt {
+        (crate::mesh3d::TEX_MUD, crate::mesh3d::MUD_TINT, false)
+    } else if surface::is_unpaved(surf) {
+        let (t, ti) = surface::tex_and_tint(surf);
+        (t, ti, false)
     } else {
-        surface::tex_and_tint(surf)
+        (crate::mesh3d::TEX_ROAD_TRIM, crate::mesh3d::ROAD_TINT, true)
     };
     let y_patch = elev + 0.03;
     let y_disc = elev + 0.06;
@@ -630,14 +696,37 @@ fn mesh_parts_dirt(j: &Junction, dirt: bool, surf: u8, elev: f32) -> Vec<MeshPar
             }
             let mut part = MeshPart::new(tint);
             part.tex = tex;
-            // centroid fan
-            let cx = j.outline.iter().map(|p| p.0).sum::<f64>() / n as f64;
-            let cz = j.outline.iter().map(|p| p.1).sum::<f64>() / n as f64;
-            for &(x, z) in &j.outline {
+            // centroid fan — R14: corners sorted by angle around the
+            // centroid first. Mixed junctions (slip ramps with near-duplicate
+            // leg angles) used to fold the n-gon into overlapping dark
+            // slivers with grass showing through.
+            let mut outline: Vec<(f64, f64)> = j.outline.clone();
+            let cx0 = outline.iter().map(|p| p.0).sum::<f64>() / n as f64;
+            let cz0 = outline.iter().map(|p| p.1).sum::<f64>() / n as f64;
+            outline.sort_by(|a, b| {
+                let aa = (a.1 - cz0).atan2(a.0 - cx0);
+                let bb = (b.1 - cz0).atan2(b.0 - cx0);
+                aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let cx = cx0;
+            let cz = cz0;
+            // UV: trim-plain patches keep U pinned INSIDE the plain column
+            // (0.875..1.0 — neighbouring columns carry baked lines) and run
+            // V radially at the road's own tile density; world-textured
+            // fallbacks keep the old world/6 mapping.
+            let uv_at = |x: f64, z: f64| -> [f32; 2] {
+                if trim_plain {
+                    let d = ((x - cx).hypot(z - cz)) as f32;
+                    [0.9375, d / 14.0]
+                } else {
+                    [(x / 6.0) as f32, (z / 6.0) as f32]
+                }
+            };
+            for &(x, z) in &outline {
                 part.positions.push(Vec3::new(cx as f32, y_patch, cz as f32));
                 part.positions.push(Vec3::new(x as f32, y_patch, z as f32));
-                part.uv.push([(cx / 6.0) as f32, (cz / 6.0) as f32]);
-                part.uv.push([(x / 6.0) as f32, (z / 6.0) as f32]);
+                part.uv.push(uv_at(cx, cz));
+                part.uv.push(uv_at(x, z));
             }
             for k in 0..n {
                 let a = (k * 2) as u32;
@@ -648,7 +737,7 @@ fn mesh_parts_dirt(j: &Junction, dirt: bool, surf: u8, elev: f32) -> Vec<MeshPar
             }
             parts.push(part);
             if !dirt && !surface::is_unpaved(surf) {
-                parts.extend(crosswalk_parts(j, elev));
+                parts.extend(crosswalk_parts(j, curves, elev));
             }
         }
         JunctionKind::Roundabout => {
@@ -657,6 +746,14 @@ fn mesh_parts_dirt(j: &Junction, dirt: bool, surf: u8, elev: f32) -> Vec<MeshPar
             // annulus (surface follows the legs' dominant surface)
             let mut ann = MeshPart::new(tint);
             ann.tex = tex;
+            let uv_at = |x: f64, z: f64| -> [f32; 2] {
+                if trim_plain {
+                    let d = ((x - j.x).hypot(z - j.z)) as f32;
+                    [0.9375, d / 14.0]
+                } else {
+                    [(x / 6.0) as f32, (z / 6.0) as f32]
+                }
+            };
             for k in 0..ring {
                 let a0 = k as f64 / ring as f64 * std::f64::consts::TAU;
                 let a1 = (k + 1) as f64 / ring as f64 * std::f64::consts::TAU;
@@ -668,10 +765,10 @@ fn mesh_parts_dirt(j: &Junction, dirt: bool, surf: u8, elev: f32) -> Vec<MeshPar
                 ann.positions.push(Vec3::new(x0i as f32, y_patch, z0i as f32));
                 ann.positions.push(Vec3::new(x1o as f32, y_patch, z1o as f32));
                 ann.positions.push(Vec3::new(x1i as f32, y_patch, z1i as f32));
-                ann.uv.push([(x0o / 6.0) as f32, (z0o / 6.0) as f32]);
-                ann.uv.push([(x0i / 6.0) as f32, (z0i / 6.0) as f32]);
-                ann.uv.push([(x1o / 6.0) as f32, (z1o / 6.0) as f32]);
-                ann.uv.push([(x1i / 6.0) as f32, (z1i / 6.0) as f32]);
+                ann.uv.push(uv_at(x0o, z0o));
+                ann.uv.push(uv_at(x0i, z0i));
+                ann.uv.push(uv_at(x1o, z1o));
+                ann.uv.push(uv_at(x1i, z1i));
                 let b = (k * 4) as u32;
                 ann.indices.extend_from_slice(&[b, b + 2, b + 1, b + 1, b + 2, b + 3]);
             }
@@ -697,26 +794,80 @@ fn mesh_parts_dirt(j: &Junction, dirt: bool, surf: u8, elev: f32) -> Vec<MeshPar
     parts
 }
 
-/// White pavement markings for a crossing: zebra crosswalk stripes + a
-/// stop line across the incoming lanes of every leg (right-hand traffic).
-/// Quads hover 0.03 m above the asphalt patch (painted-marking layer),
-/// which itself rides the junction elevation `elev`.
-fn crosswalk_parts(j: &Junction, elev: f32) -> Vec<MeshPart> {
+/// Per-leg stop-line distance: proportionate to the leg's own width
+/// (R14 — was a global max over all legs, which pushed narrow slip-road
+/// corners far out of scale at mixed junctions), clamped to a sane band.
+fn leg_stop_m(l: &JunctionLeg) -> f64 {
+    (l.half_width * 1.4 + 1.0).max(3.0).min(26.0)
+}
+
+/// Incoming-flow layout of a leg: (incoming lane count, lane width,
+/// median half-width). Tanzania drives on the LEFT — the incoming lanes
+/// span the +perp(out_dir) half from the median edge. Oneway legs serve
+/// incoming flow at their LAST point; through oneway legs are
+/// approximated as serving both directions.
+fn leg_incoming(curves: &[RoadCurve], l: &JunctionLeg) -> (usize, f64, f64) {
+    match curves.get(l.curve).and_then(|c| leg_point(c, l)) {
+        Some(p) => {
+            let lw = p.lane_width.max(2.2);
+            let m = p.median / 2.0;
+            let n_total = p.lanes.max(1) as usize;
+            if p.oneway {
+                let serving = !l.is_end || l.end == 1;
+                (if serving { n_total } else { 0 }, lw, m)
+            } else {
+                ((n_total / 2).max(1), lw, m)
+            }
+        }
+        None => {
+            let n = ((l.half_width / 3.6).round() as usize).clamp(1, 4);
+            (n, 3.5, 0.0)
+        }
+    }
+}
+
+/// Departure-flow layout of a leg: (departing lane count, lane width,
+/// median half-width). LHT: departing traffic occupies the -perp(out_dir)
+/// half. Oneway legs depart only at their FIRST point (flow leaves the
+/// junction); through oneway legs are approximated as serving both ways.
+fn leg_departure(curves: &[RoadCurve], l: &JunctionLeg) -> (usize, f64, f64) {
+    match curves.get(l.curve).and_then(|c| leg_point(c, l)) {
+        Some(p) => {
+            let lw = p.lane_width.max(2.2);
+            let m = p.median / 2.0;
+            let n_total = p.lanes.max(1) as usize;
+            if p.oneway {
+                let serving = !l.is_end || l.end == 0;
+                (if serving { n_total } else { 0 }, lw, m)
+            } else {
+                ((n_total / 2).max(1), lw, m)
+            }
+        }
+        None => (1, 3.5, 0.0),
+    }
+}
+
+/// White pavement markings for a crossing (R14 RA-style turn-lane
+/// markings): per-leg stop line + zebra crosswalk + TURN-LANE ARROWS on
+/// every incoming lane (left+straight innermost, straight middle,
+/// right+straight outermost) + DASHED TURN-PATH GUIDES through the
+/// junction. Quads hover 0.06 m above the asphalt patch, which rides the
+/// junction elevation `elev`.
+fn crosswalk_parts(j: &Junction, curves: &[RoadCurve], elev: f32) -> Vec<MeshPart> {
     let mut mk = MeshPart::new([0.92, 0.92, 0.9, 1.0]);
     mk.tex = -1; // flat white
-    let max_half = j
-        .legs
-        .iter()
-        .map(|l| l.half_width)
-        .fold(0.0f64, f64::max);
-    let stop = (max_half * 1.4 + 1.0).max(3.0);
     let y = elev + 0.06;
     for l in &j.legs {
         let (dx, dz) = l.out_dir;
         let (px, pz) = leg_perp(l.out_dir);
         let hw = l.half_width;
-        // quad helper: center dist a..b along the leg, lateral u..v across it
-        let mut quad = |a: f64, b: f64, u: f64, v: f64| {
+        if hw < 1.2 {
+            continue;
+        }
+        let stop = leg_stop_m(l);
+        // quad helper: center dist a..b along the leg, lateral u..v across
+        // it (mesh passed as an arg — several paint helpers coexist)
+        let quad = |mk: &mut MeshPart, a: f64, b: f64, u: f64, v: f64| {
             let p = |fwd: f64, lat: f64| {
                 Vec3::new(
                     (j.x + dx * fwd + px * lat) as f32,
@@ -732,20 +883,253 @@ fn crosswalk_parts(j: &Junction, elev: f32) -> Vec<MeshPart> {
             mk.indices
                 .extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
         };
-        // stop line: incoming side only. Incoming travel direction is -d;
-        // right of travel = leg_perp(-d) = -leg_perp(d), so the incoming
-        // lanes span lateral -hw..0 in leg_perp(d) coordinates.
-        quad(stop + 0.3, stop + 0.75, -hw + 0.35, -0.15);
+        // triangle glyph (the raster is two-sided, winding is free)
+        let tri = |mk: &mut MeshPart, t: (f64, f64), b0: (f64, f64), b1: (f64, f64)| {
+            let p = |fwd: f64, lat: f64| {
+                Vec3::new(
+                    (j.x + dx * fwd + px * lat) as f32,
+                    y,
+                    (j.z + dz * fwd + pz * lat) as f32,
+                )
+            };
+            let base = mk.positions.len() as u32;
+            mk.positions.push(p(t.0, t.1));
+            mk.positions.push(p(b0.0, b0.1));
+            mk.positions.push(p(b1.0, b1.1));
+            mk.indices.extend_from_slice(&[base, base + 1, base + 2]);
+        };
+        // stop line across the INCOMING half (+lat, LHT) — skipped on
+        // departure-only legs (oneway exits)
+        let (n_in, lw, m) = leg_incoming(curves, l);
+        if n_in > 0 {
+            quad(&mut mk, stop + 0.3, stop + 0.75, 0.15, hw - 0.35);
+        }
         // zebra: 0.45 m stripes with 0.45 m gaps, across the full width
         let z0 = stop + 1.1;
         let z1 = stop + 2.9;
         let mut lat = -hw + 0.35;
         while lat + 0.45 <= hw - 0.3 {
-            quad(z0, z1, lat, lat + 0.45);
+            quad(&mut mk, z0, z1, lat, lat + 0.45);
             lat += 0.9;
         }
+        // turn-lane arrows beyond the zebra, tips toward the junction:
+        // innermost lane (centerline side) = LEFT+STRAIGHT (the far-side
+        // turn in LHT), outermost = RIGHT+STRAIGHT (near-side), middle
+        // lanes straight.
+        for i in 0..n_in {
+            let lat = m + (i as f64 + 0.5) * lw;
+            if lat + 0.5 > hw - 0.25 {
+                break;
+            }
+            let want_left = n_in >= 2 && i == 0;
+            let want_right = n_in >= 3 && i == n_in - 1;
+            // straight shaft + head
+            quad(&mut mk, stop + 3.55, stop + 5.8, lat - 0.07, lat + 0.07);
+            tri(
+                &mut mk,
+                (stop + 2.6, lat),
+                (stop + 3.55, lat - 0.42),
+                (stop + 3.55, lat + 0.42),
+            );
+            // turn branch: slanted shaft + head toward the turn side
+            // (+lat = driver's left, -lat = driver's right in LHT)
+            for (want, s) in [(want_left, 1.0f64), (want_right, -1.0f64)] {
+                if !want {
+                    continue;
+                }
+                let (f0, l0) = (stop + 3.5, lat);
+                let (f1, l1) = (stop + 2.55, lat + s * 0.62);
+                let d = (f1 - f0, l1 - l0);
+                let len = d.0.hypot(d.1).max(1e-6);
+                let (nf, nl) = (-d.1 / len * 0.07, d.0 / len * 0.07);
+                let p = |fwd: f64, lat: f64| {
+                    Vec3::new(
+                        (j.x + dx * fwd + px * lat) as f32,
+                        y,
+                        (j.z + dz * fwd + pz * lat) as f32,
+                    )
+                };
+                let base = mk.positions.len() as u32;
+                mk.positions.push(p(f0 + nf, l0 + nl));
+                mk.positions.push(p(f0 - nf, l0 - nl));
+                mk.positions.push(p(f1 + nf, l1 + nl));
+                mk.positions.push(p(f1 - nf, l1 - nl));
+                mk.indices.extend_from_slice(&[
+                    base,
+                    base + 2,
+                    base + 1,
+                    base + 1,
+                    base + 2,
+                    base + 3,
+                ]);
+                let tip = (stop + 2.15, lat + s * 0.98);
+                let b0 = (stop + 2.85, lat + s * 0.45);
+                let b1 = (stop + 2.35, lat + s * 1.02);
+                tri(&mut mk, tip, b0, b1);
+            }
+        }
     }
-    vec![mk]
+    let mut out = vec![mk];
+    out.extend(turn_guide_parts(j, curves, y));
+    out
+}
+
+/// Dashed turn-path guides through the junction (R14): one dashed
+/// quadratic bezier per natural movement — through lanes continue to the
+/// opposite leg's matching departure lane, the innermost incoming lane
+/// also curves to the LEFT-side legs (+perp side, far-side turn in LHT),
+/// the outermost also curves to the RIGHT-side legs (near-side turn).
+/// Each guide lands on the target leg's DEPARTURE lane center (LHT:
+/// departing traffic occupies the -perp(out_dir) half).
+fn turn_guide_parts(j: &Junction, curves: &[RoadCurve], y: f32) -> Vec<MeshPart> {
+    if j.legs.len() < 2 {
+        return Vec::new();
+    }
+    let mut g = MeshPart::new([0.80, 0.81, 0.80, 1.0]);
+    g.tex = -1;
+
+    // One dashed polyline: quadratic bezier P0 -> C -> P1 sampled at
+    // ~1.0 m steps, painted as 0.09 m wide dashes (1.0 m dash / 1.3 m gap).
+    let dashed_curve = |g: &mut MeshPart, p0: (f64, f64), c: (f64, f64), p1: (f64, f64)| {
+        let bez = |t: f64| {
+            let u = 1.0 - t;
+            (
+                u * u * p0.0 + 2.0 * u * t * c.0 + t * t * p1.0,
+                u * u * p0.1 + 2.0 * u * t * c.1 + t * t * p1.1,
+            )
+        };
+        let approx_len = (p0.0 - c.0).hypot(p0.1 - c.1) + (c.0 - p1.0).hypot(c.1 - p1.1);
+        let steps = ((approx_len / 1.0).ceil() as usize).clamp(6, 40);
+        let mut prev = p0;
+        let mut acc = 0.0f64;
+        let mut drawing = true;
+        for k in 1..=steps {
+            let t = k as f64 / steps as f64;
+            let cur = bez(t);
+            let seg = (cur.0 - prev.0).hypot(cur.1 - prev.1);
+            acc += seg;
+            if drawing {
+                if acc >= 1.0 {
+                    let d = (cur.0 - prev.0, cur.1 - prev.1);
+                    let len = d.0.hypot(d.1).max(1e-6);
+                    let (nf, nl) = (-d.1 / len * 0.045, d.0 / len * 0.045);
+                    let base = g.positions.len() as u32;
+                    g.positions.push(Vec3::new((prev.0 + nf) as f32, y, (prev.1 + nl) as f32));
+                    g.positions.push(Vec3::new((prev.0 - nf) as f32, y, (prev.1 - nl) as f32));
+                    g.positions.push(Vec3::new((cur.0 + nf) as f32, y, (cur.1 + nl) as f32));
+                    g.positions.push(Vec3::new((cur.0 - nf) as f32, y, (cur.1 - nl) as f32));
+                    g.indices.extend_from_slice(&[
+                        base,
+                        base + 2,
+                        base + 1,
+                        base + 1,
+                        base + 2,
+                        base + 3,
+                    ]);
+                    acc = 0.0;
+                    drawing = false;
+                }
+            } else if acc >= 1.3 {
+                acc = 0.0;
+                drawing = true;
+                prev = cur;
+                continue;
+            }
+            prev = cur;
+        }
+    };
+
+    for (ai, a) in j.legs.iter().enumerate() {
+        let (n_in, lw_a, m_a) = leg_incoming(curves, a);
+        if n_in == 0 {
+            continue;
+        }
+        let stop_a = leg_stop_m(a);
+        let (pax, paz) = leg_perp(a.out_dir);
+        // candidate targets: through = most-opposite leg; left = +perp
+        // side; right = -perp side
+        let mut through: Option<(usize, f64)> = None;
+        let mut left: Option<(usize, f64)> = None;
+        let mut right: Option<(usize, f64)> = None;
+        for (bi, b) in j.legs.iter().enumerate() {
+            if bi == ai {
+                continue;
+            }
+            let dot = a.out_dir.0 * b.out_dir.0 + a.out_dir.1 * b.out_dir.1;
+            let (perx, perz) = leg_perp(a.out_dir);
+            let dot_perp = perx * b.out_dir.0 + perz * b.out_dir.1;
+            if dot < -0.5 && through.map(|(_, d)| dot < d).unwrap_or(true) {
+                through = Some((bi, dot));
+            }
+            if dot_perp > 0.45 && left.map(|(_, d)| dot_perp > d).unwrap_or(true) {
+                left = Some((bi, dot_perp));
+            }
+            if dot_perp < -0.45 && right.map(|(_, d)| dot_perp < d).unwrap_or(true) {
+                right = Some((bi, dot_perp));
+            }
+        }
+        for i in 0..n_in {
+            let lat_in = m_a + (i as f64 + 0.5) * lw_a;
+            if lat_in > a.half_width - 0.2 {
+                break;
+            }
+            let p0 = (
+                j.x + a.out_dir.0 * stop_a * 0.85 + pax * lat_in,
+                j.z + a.out_dir.1 * stop_a * 0.85 + paz * lat_in,
+            );
+            // through guide: continue every lane to the opposite leg's
+            // matching departure lane
+            if let Some((bi, _)) = through {
+                let b = &j.legs[bi];
+                let (n_dep, lw_b, m_b) = leg_departure(curves, b);
+                if n_dep > 0 {
+                    let k = i.min(n_dep - 1);
+                    let lat_out = -(m_b + (k as f64 + 0.5) * lw_b);
+                    let stop_b = leg_stop_m(b);
+                    let (pbx, pbz) = leg_perp(b.out_dir);
+                    let p1 = (
+                        j.x + b.out_dir.0 * stop_b * 0.85 + pbx * lat_out,
+                        j.z + b.out_dir.1 * stop_b * 0.85 + pbz * lat_out,
+                    );
+                    let c = (
+                        j.x + (p0.0 - j.x + p1.0 - j.x) * 0.24,
+                        j.z + (p0.1 - j.z + p1.1 - j.z) * 0.24,
+                    );
+                    dashed_curve(&mut g, p0, c, p1);
+                }
+            }
+            // turn guides: innermost lane to the left-side leg, outermost
+            // to the right-side leg
+            let is_inner = i == 0;
+            let is_outer = i == n_in - 1;
+            for (pick, side) in [(left, 1.0f64), (right, -1.0f64)] {
+                let eligible = (side > 0.0 && is_inner) || (side < 0.0 && is_outer);
+                if !eligible {
+                    continue;
+                }
+                if let Some((bi, _)) = pick {
+                    let b = &j.legs[bi];
+                    let (n_dep, lw_b, m_b) = leg_departure(curves, b);
+                    if n_dep == 0 {
+                        continue;
+                    }
+                    let lat_out = -(m_b + 0.5 * lw_b);
+                    let stop_b = leg_stop_m(b);
+                    let (pbx, pbz) = leg_perp(b.out_dir);
+                    let p1 = (
+                        j.x + b.out_dir.0 * stop_b * 0.85 + pbx * lat_out,
+                        j.z + b.out_dir.1 * stop_b * 0.85 + pbz * lat_out,
+                    );
+                    let c = (
+                        j.x + (p0.0 - j.x + p1.0 - j.x) * 0.30,
+                        j.z + (p0.1 - j.z + p1.1 - j.z) * 0.30,
+                    );
+                    dashed_curve(&mut g, p0, c, p1);
+                }
+            }
+        }
+    }
+    vec![g]
 }
 
 /* ------------------------------------------------------------------ */
@@ -999,8 +1383,10 @@ pub fn roundabout_marking_parts(j: &Junction, curves: &[RoadCurve]) -> Vec<MeshP
         let hw = l.half_width.max(1.0);
         let f0 = j.ring_outer - 1.7;
         let f1 = j.ring_outer - 1.25;
-        let lat0 = -hw + 0.35; // incoming lanes span lat -hw..0 (like crossings)
-        let lat1 = -0.15;
+        // R14 LHT fix: the incoming half is +lat (mirrors the traffic
+        // sim's LHT lateral offset), like the crossing stop lines.
+        let lat0 = 0.15;
+        let lat1 = hw - 0.35;
         if lat1 - lat0 < 0.5 {
             continue;
         }

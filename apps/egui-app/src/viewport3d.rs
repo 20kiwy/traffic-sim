@@ -1077,11 +1077,11 @@ fn painter_clip(ui: &egui::Ui, rect: egui::Rect) -> egui::Rect {
 /// metre ladder aiming at about four cells across the visible half-width,
 /// so any dolly keeps a legible ladder. (TerraZone `grid_spacing`; the
 /// viewport's fixed fov_y is 0.9 rad, as in `OrbitCam::proj`.)
-fn grid_spacing(dist: f32) -> f32 {
+fn grid_spacing(dist: f32, scene_radius: f32) -> f32 {
     let raw = 2.0 * dist * 0.9f32.tan().max(0.01) / 4.0;
     let pow = 10.0f32.powf(raw.max(1e-3).log10().floor());
     let m = raw / pow;
-    if m < 1.5 {
+    let mut s = if m < 1.5 {
         pow
     } else if m < 3.5 {
         2.0 * pow
@@ -1089,7 +1089,15 @@ fn grid_spacing(dist: f32) -> f32 {
         5.0 * pow
     } else {
         10.0 * pow
+    };
+    // R14: cells never outgrow the ground — at far zooms the ladder used to
+    // pick 200 m cells over a 150 m ground fan, so the grid shrank to the
+    // two axes and the cursor highlight covered half the scene
+    let cap = (scene_radius / 6.0).max(2.0);
+    while s > cap {
+        s /= 2.0;
     }
+    s
 }
 
 /// The X/Z ground grid over the rendered engine terrain — TerraZone's
@@ -1135,7 +1143,7 @@ fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &r
     let fog_end = cam.dist + scene.radius_m * 3.4;
 
     let target = cam.target;
-    let s = grid_spacing(cam.dist);
+    let s = grid_spacing(cam.dist, scene.radius_m);
     let e = scene.ground_extent;
     // flat ground = the radial grass fan (disc); terrain = the square
     // heightfield — each mode clips its lines to its own shape
@@ -1581,7 +1589,7 @@ fn draw_cursor_cell_highlight(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect,
     let Some((wx, _, wz)) = oc.ground_hit(app, pointer, plane_y) else {
         return;
     };
-    let s = grid_spacing(app.cam.dist);
+    let s = grid_spacing(app.cam.dist, scene.radius_m);
     let sd = s as f64;
     let (cx, cz) = ((wx / sd).floor() * sd, (wz / sd).floor() * sd);
     let lift = 0.035f32;

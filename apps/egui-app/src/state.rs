@@ -602,7 +602,11 @@ impl RoadkitApp {
         self.sel_container = None;
         self.sel_junction = None;
         self.script_status = ScriptStatus::Idle;
-        self.status = "scene cleared".to_string();
+        // R14: a fresh scene also gets the default orbit (the loaded site
+        // camera used to survive the reset, leaving a tiny fogged ground
+        // blob floating in grey haze — "the scene is not well")
+        self.cam = gdmath::OrbitCam::default();
+        self.status = "scene cleared — pick the point tool (A) and click to draw a road".to_string();
     }
 
     /// Remove every placed GLB prop (keeps roads).
@@ -1755,6 +1759,26 @@ impl eframe::App for RoadkitApp {
         }
         if ctx.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.any()) {
             self.fit_scene();
+        }
+        // R14: the advertised tool shortcuts actually work now (a text
+        // field keeps them — no shortcuts while typing). A switches to the
+        // point tool AND drops a point under the cursor, like a click.
+        if !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.key_pressed(egui::Key::V) && !i.modifiers.any()) {
+                self.tool = Tool::Select;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::A) && !i.modifiers.any()) {
+                self.tool = Tool::AddPoint;
+                if let Some([wx, _, wz]) = self.cursor_world {
+                    self.add_point_at(wx, wz);
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::P) && !i.modifiers.any()) {
+                self.tool = Tool::Stamp;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::H) && !i.modifiers.any()) {
+                self.tool = Tool::Pan;
+            }
         }
 
         // VectorCraft-style frame order: bars → right dock → central doc tab

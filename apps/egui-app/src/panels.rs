@@ -161,6 +161,11 @@ fn dock_tab_strip(app: &mut RoadkitApp, ui: &mut egui::Ui) {
 }
 
 /* ================================================================== */
+/// R14 — expert settings are PARKED: the app is roads + bridges only.
+/// Flip to true to restore the GRG expert sections (Lanes/AI, editor
+/// toggles, the terrain connector, asset counts) in the Properties dock.
+const EXPERT_SETTINGS: bool = false;
+
 /* LAYERS — the data-driven layer engine (RoadManager→Container→Point) */
 /* ================================================================== */
 
@@ -1152,6 +1157,7 @@ fn container_inspector(app: &mut RoadkitApp, ui: &mut egui::Ui, ci: usize) {
             }
         });
 
+    if EXPERT_SETTINGS {
     egui::CollapsingHeader::new(RichText::new("Lanes and AI").size(12.0).color(t.text_strong))
         .id_source("cont_lanes")
         .default_open(true)
@@ -1198,6 +1204,7 @@ fn container_inspector(app: &mut RoadkitApp, ui: &mut egui::Ui, ci: usize) {
                 app.make_lanes_editable();
             }
         });
+    } // EXPERT_SETTINGS
 
     egui::CollapsingHeader::new(RichText::new("Decoration").size(12.0).color(t.text_strong))
         .id_source("cont_deco")
@@ -1423,37 +1430,8 @@ fn scene_inspector(app: &mut RoadkitApp, ui: &mut egui::Ui) {
             });
         });
 
-    egui::CollapsingHeader::new(RichText::new("Lanes and AI").size(12.0).color(t.text_strong))
-        .id_source("mgr_lanes")
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.label(RichText::new("ai_lane_group").size(11.5));
-            let mut group = mg.ai_lane_group.clone();
-            if ui
-                .add(egui::TextEdit::singleline(&mut group).desired_width(ui.available_width()))
-                .lost_focus()
-                && group != mg.ai_lane_group
-                && !group.is_empty()
-            {
-                mg.ai_lane_group = group;
-                mg_changed = true;
-            }
-            let n = app.scene.borrow().lanes.len();
-            egui_kit::dim_text(ui, &format!("{n} RoadLanes in the scene"));
-        });
-
-    egui::CollapsingHeader::new(RichText::new("Editor settings").size(12.0).color(t.text_strong))
-        .id_source("mgr_editor")
-        .default_open(false)
-        .show(ui, |ui| {
-            if ui
-                .checkbox(&mut mg.auto_refresh, "auto_refresh")
-                .on_hover_text("Regenerate junctions + lanes automatically on transforms")
-                .changed()
-            {
-                mg_changed = true;
-            }
-        });
+    // R14: the Lanes/AI + Editor-settings sections are parked behind
+    // EXPERT_SETTINGS — roads + bridges only for now.
 
     if mg_changed {
         app.scene.borrow_mut().manager = mg;
@@ -1461,7 +1439,8 @@ fn scene_inspector(app: &mut RoadkitApp, ui: &mut egui::Ui) {
         app.render.dirty = true;
     }
 
-    /* ---- RoadTerrain3DConnector ---- */
+    /* ---- RoadTerrain3DConnector (parked — R14) ---- */
+    if EXPERT_SETTINGS {
     divider(ui);
     header(ui, "RoadTerrain3DConnector");
     let terrain_on = app.scene.borrow().terrain.enabled;
@@ -1517,6 +1496,8 @@ fn scene_inspector(app: &mut RoadkitApp, ui: &mut egui::Ui) {
         }
     }
 
+    } // EXPERT_SETTINGS
+
     divider(ui);
     header(ui, "Junction engine");
     let mut js = app.scene.borrow().junction_settings.clone();
@@ -1539,9 +1520,16 @@ fn scene_inspector(app: &mut RoadkitApp, ui: &mut egui::Ui) {
         app.render.dirty = true;
     }
     divider(ui);
+    header(ui, "Junction engine");
+    egui_kit::dim_text(ui, "island radius lives in the control bar's snap settings — roads + bridges only (R14)");
+}
+
+/* manager inspector extras (parked): terrain connector + asset counts
+fn parked_scene_extras(app: &mut RoadkitApp, ui: &mut egui::Ui) {
+    divider(ui);
     header(ui, "Assets");
     egui_kit::dim_text(ui, &format!("{} GLB assets · {} textures loaded", app.assets.entries.len(), app.textures.slot_count()));
-}
+}*/
 
 /* ================================================================== */
 /* ASSETS                                                              */

@@ -29,6 +29,7 @@ func _ready():
         print("RoadKit: junction test — crossing + roundabout + T-join...")
         auto_junction(true)
         auto_roundabout(true)
+        junction_prefabs(true) # this scene also exercises the WFC GLB tiles
         set_snap_m(8.0)
 
         # 1. four-way crossing at the origin (pure THROUGH crossing)

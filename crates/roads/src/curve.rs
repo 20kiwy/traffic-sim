@@ -44,10 +44,19 @@ pub fn bez_point(s: &CubicSeg, t: f64) -> Vec2 {
 pub fn segment_cubic(a: &RoadPoint, b: &RoadPoint) -> CubicSeg {
     let (ax, az) = a.dir();
     let (bx, bz) = b.dir();
+    // R14: clamp the bezier handles to the chord. Magnitudes larger than
+    // the segment distance used to loop the spline back over itself —
+    // OSM slip ramps carried 30 m handles on ~4.5 m point spacing and
+    // scribbled into folded dark fans, and user-placed points did the
+    // same (the "point placement bug"). 0.6 of the chord is a generous
+    // ceiling: normal GRG magnitudes run ~1/3 of the segment.
+    let chord = ((b.x - a.x).hypot(b.z - a.z)) * 0.6;
+    let out_m = a.next_mag.min(chord);
+    let in_m = b.prior_mag.min(chord);
     CubicSeg {
         p0: Vec2::new(a.x, a.z),
-        p1: Vec2::new(a.x + ax * a.next_mag, a.z + az * a.next_mag),
-        p2: Vec2::new(b.x - bx * b.prior_mag, b.z - bz * b.prior_mag),
+        p1: Vec2::new(a.x + ax * out_m, a.z + az * out_m),
+        p2: Vec2::new(b.x - bx * in_m, b.z - bz * in_m),
         p3: Vec2::new(b.x, b.z),
     }
 }

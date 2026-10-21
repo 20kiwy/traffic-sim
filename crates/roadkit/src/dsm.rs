@@ -1182,10 +1182,19 @@ pub fn apply_bridge_styles(curves: &mut [RoadCurve]) {
     }
 }
 
+/// BACKUP — roadside prop stamping is PARKED (R14: the app shows ONLY
+/// roads + bridges; no trees, no palms, no streetlights, no signs, no
+/// workzone cones/barrels/attenuators, no BRT station props). The whole
+/// generator stays here — flip this flag to bring the dressing back.
+pub const PROPS_ENABLED: bool = false;
+
 /// Roadside props (the "edge objects" of RA — docs §2): streetlights every
 /// ~36 m on arterials, acacia/palm tree runs, speed-limit signs, and the
 /// BRT station props at the modelled station sites.
 pub fn dsm_props_capped(curves: &[RoadCurve], max_range: f64) -> Vec<PropInstance> {
+    if !PROPS_ENABLED {
+        return Vec::new();
+    }
     let mut out: Vec<PropInstance> = Vec::new();
     const TREE_CAP: usize = 950;
     let mut tree_count = 0usize;
