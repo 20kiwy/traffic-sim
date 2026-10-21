@@ -213,6 +213,10 @@ pub struct RenderState {
     pub env_contours: bool,
     /// R15: show the Gerstner water plane at the scene's low watermark
     pub env_water: bool,
+    /// R16: the Egregoria atmosphere (sky LUT + aerial-perspective fog +
+    /// sun disc). OFF = the clean editor look: flat theme backdrop, unlit
+    /// floor, no fog — the full-grid editor the user asked for.
+    pub env_atmo: bool,
 }
 
 impl Default for RenderState {
@@ -240,6 +244,7 @@ impl Default for RenderState {
             env_shadows: true,
             env_contours: true,
             env_water: false,
+            env_atmo: false,
         }
     }
 }

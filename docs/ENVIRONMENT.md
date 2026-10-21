@@ -44,3 +44,45 @@ engine grass ramp, blended to sand/sea below the waterline, and faded into
 the haze at the rim. The old 3-ring fan (wedge-striped) is gone; the
 flatten follows the LOWEST road envelope at interchanges so underpass
 roads are never buried.
+
+## R16 — the editor look (default) + atmosphere toggle
+
+The full atmosphere is now a TOGGLE (`sky` in the editor toolbar,
+`ROADKIT_ATMO` in the CLI; `Environment::new(..., atmo, backdrop)`). The
+DEFAULT is the clean editor look the user asked for ("full grid, no green
+background, no whitish cloud"):
+
+- **No aerial-perspective fog, no sky LUT fill, no sun disc** — sky pixels
+  are a flat backdrop (`Environment.backdrop`, the editor theme's input
+  color), pre-inverted through autoexposure + tonemap so the encoded
+  pixels match the surrounding UI paper exactly (`editor_backdrop_linear`).
+- **No grass ground** — the terrain/grass mesh is skipped and replaced by
+  one unlit backdrop-colored floor quad (`Frame::flat_floor`, y = −0.02,
+  extent `editor_extent = max(radius·3, 500 m, dist·3)`), so floor and
+  backdrop melt into one seamless paper with no visible horizon.
+- **Full grid** — the TerraZone overlay grid rides the same editor extent
+  (not a 28-cell patch), with a zoom-scaled window (up to 320 cells) and a
+  gentle far fade; ink switches with the theme (light paper → black ink,
+  dark charcoal → white ink). Overlay text (HUD, point labels, tooltips,
+  ruler) follows the theme too.
+- Turning `sky` on restores the full R15 environment (atmosphere LUTs,
+  grass ground, sun shadows, water, contours) for pretty renders.
+
+## R16 — scene origin (the alignment fix)
+
+`Scene` now carries `origin: [f32; 2]` — the bbox-centre recentering that
+`build_scene_enriched` subtracts from every mesh vertex. Document-space
+overlays (RoadPoint gizmos, signal heads, turn labels, cursor pick, the
+AddPoint write-back) and the per-frame traffic/flow sim draws convert
+through it (doc → scene: `p − origin`; scene → doc: `p + origin`), so
+gizmos stay glued to the meshes for scenes authored anywhere in the world
+and points placed in 3D land at the right document coordinates.
+
+## R16 — band-render aspect fix
+
+`draw_all` computed the projection aspect from `frame.h` — the BAND height
+in multithreaded rendering — squeezing every multi-band render to
+`(1/threads)` width about the viewport centre (2 bands → the mesh rendered
+at ~50 % width while the screen-space overlays stayed correct: the
+"points and render not well aligned" report). The aspect now uses
+`frame.full_h`.

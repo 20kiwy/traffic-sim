@@ -95,6 +95,11 @@ pub struct Scene {
     pub props: Vec<PropDraw>,
     /// ground plane (grass fan / terrain heightfield)
     pub ground: Vec<ScenePart>,
+    /// the bbox-centre recentering subtracted from EVERY part/prop
+    /// position (`scene = doc - origin`). Document-space overlays (RoadPoint
+    /// gizmos, signal heads, cursor pick) subtract this before projecting so
+    /// they stay glued to the meshes; un-projecting adds it back.
+    pub origin: [f32; 2],
     pub radius_m: f32,
     /// meters: the ground's reach from the origin (heightfield 1.2r when
     /// the terrain connector rides along, grass fan 1.6r flat) — viewport
@@ -443,6 +448,7 @@ pub fn build_scene_enriched(
         parts,
         props: prop_draws,
         ground,
+        origin: [cx, cz],
         radius_m: radius,
         ground_extent,
         sampler,
@@ -898,6 +904,13 @@ pub struct Environment {
     pub shadows: bool,
     /// wave/animation clock (static in still renders; the app may advance it)
     pub env_time: f32,
+    /// Egregoria atmosphere: sky LUT backdrop + aerial-perspective fog.
+    /// OFF = the clean EDITOR look — flat backdrop, no fog, unlit floor
+    /// (the editor grid overlay then covers the whole ground).
+    pub atmo: bool,
+    /// flat backdrop color (sRGB 0..1 rgb) used when `atmo` is off — also
+    /// the unlit editor floor color, so floor and sky melt into one paper.
+    pub backdrop: [f32; 3],
 }
 
 impl Environment {
@@ -909,6 +922,8 @@ impl Environment {
         shadows: bool,
         contours: bool,
         water_level: Option<f32>,
+        atmo: bool,
+        backdrop: [f32; 3],
     ) -> Self {
         let dir = engine::sun::sun_dir(time_of_day).normalized();
         let col = engine::sun::sun_color(dir);
@@ -922,12 +937,21 @@ impl Environment {
             contours,
             shadows,
             env_time: 0.0,
+            atmo,
+            backdrop,
         }
     }
 
-    /// The default editor look: mid-morning sun (10:00), shadows on.
+    /// The pretty render look: mid-morning sun (10:00), full atmosphere.
     pub fn day() -> Self {
-        Self::new(10.0 * engine::sun::HOUR, true, true, None)
+        Self::new(10.0 * engine::sun::HOUR, true, true, None, true, ENV_DAY.clear_rgb())
+    }
+
+    /// The clean editor look: same sun for the lambert shading, but NO
+    /// atmosphere — flat backdrop + unlit floor so the grid overlay can
+    /// cover the whole ground (the user's "full grid, no green, no fog").
+    pub fn editor(backdrop: [f32; 3]) -> Self {
+        Self::new(10.0 * engine::sun::HOUR, false, false, None, false, backdrop)
     }
 
     /// CLI wiring: build the environment from env vars so every headless
@@ -936,27 +960,57 @@ impl Environment {
     /// - `ROADKIT_SHADOWS`  — 0/off disables the shadow map (default on)
     /// - `ROADKIT_CONTOURS` — 1/on enables the 10 m/50 m contour lines
     /// - `ROADKIT_WATER`    — sea level in meters (default: no water)
+    /// - `ROADKIT_ATMO`     — 0/off = flat editor backdrop, no fog/sky
+    /// - `ROADKIT_BG`       — "#rrggbb" flat backdrop (default ENV_DAY)
     pub fn from_env() -> Self {
-        let hours: f64 = std::env::var("ROADKIT_TIME")
+        let mut env = Self::new(
+            Self::hours_from_env() * engine::sun::HOUR,
+            Self::flag_from_env("ROADKIT_SHADOWS", true),
+            Self::flag_from_env("ROADKIT_CONTOURS", true),
+            std::env::var("ROADKIT_WATER").ok().and_then(|v| v.parse().ok()),
+            Self::flag_from_env("ROADKIT_ATMO", true),
+            Self::bg_from_env(),
+        );
+        if !env.atmo {
+            // the editor look has no sun map to lean on — keep shadows off
+            // unless explicitly asked (they only show on the roads anyway)
+            env.shadows = Self::flag_from_env("ROADKIT_SHADOWS", false);
+        }
+        env
+    }
+
+    fn hours_from_env() -> f64 {
+        std::env::var("ROADKIT_TIME")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(10.0);
-        let shadows = std::env::var("ROADKIT_SHADOWS")
+            .unwrap_or(10.0)
+    }
+
+    fn flag_from_env(name: &str, default: bool) -> bool {
+        std::env::var(name)
             .map(|v| {
                 let v = v.to_lowercase();
-                !(v == "0" || v == "off" || v == "false")
+                if v == "0" || v == "off" || v == "false" {
+                    false
+                } else if v == "1" || v == "on" || v == "true" {
+                    true
+                } else {
+                    default
+                }
             })
-            .unwrap_or(true);
-        let contours = std::env::var("ROADKIT_CONTOURS")
-            .map(|v| {
-                let v = v.to_lowercase();
-                v == "1" || v == "on" || v == "true"
-            })
-            .unwrap_or(true);
-        let water_level: Option<f32> = std::env::var("ROADKIT_WATER")
+            .unwrap_or(default)
+    }
+
+    fn bg_from_env() -> [f32; 3] {
+        std::env::var("ROADKIT_BG")
             .ok()
-            .and_then(|v| v.parse().ok());
-        Self::new(hours * engine::sun::HOUR, shadows, contours, water_level)
+            .and_then(|v| {
+                let v = v.trim().trim_start_matches('#');
+                u32::from_str_radix(v, 16)
+                    .ok()
+                    .map(|n| [(n >> 16) as f32 / 255.0, ((n >> 8) & 0xff) as f32 / 255.0, (n & 0xff) as f32 / 255.0])
+            })
+            .unwrap_or_else(|| ENV_DAY.clear_rgb())
     }
 }
 
@@ -1031,9 +1085,6 @@ fn render_env_buffers(
     extra: &[PropDraw],
     show_props: bool,
 ) -> (Vec<f32>, Vec<f32>) {
-    // per-camera aerial-perspective LUT (the CPU fog prepass — the same
-    // atmosphere function the sky uses, so ground and sky share one haze)
-    let fog_lut: Arc<FogLut> = Arc::new(FogLut::build(cam.view_dir(), env.sun));
     // single-cascade sun shadow map (objects cast; ground receives)
     let shadow = if env.shadows && env.sun.y > 0.02 {
         Some(build_shadow_map(scene, library, cam, env))
@@ -1043,8 +1094,23 @@ fn render_env_buffers(
     // water plane (drawn last, z-tested against the terrain behind it)
     let water = env
         .water_level
+        .filter(|_| env.atmo)
         .map(|level| build_water_mesh(scene, level));
 
+    // EDITOR look (atmo off): no aerial-perspective fog, no grass ground —
+    // an unlit flat floor quad that matches the backdrop exactly, so the
+    // viewport grid overlay can cover the whole ground ("full grid, no
+    // green, no whitish cloud").
+    let fog_lut: Option<Arc<FogLut>> = if env.atmo {
+        Some(Arc::new(FogLut::build(cam.view_dir(), env.sun)))
+    } else {
+        None
+    };
+    let floor = if env.atmo {
+        None
+    } else {
+        Some(build_editor_floor(env, scene, cam))
+    };
     let props: &[PropDraw] = if show_props { extra } else { &[] };
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -1059,9 +1125,20 @@ fn render_env_buffers(
         frame.env_time = env.env_time;
         frame.contours = env.contours;
         frame.shadow = shadow.clone();
-        frame.fog_lut = Some(fog_lut.clone());
+        frame.fog_lut = fog_lut.clone();
         frame.sky = Some(env.sky.clone());
-        draw_all(frame, scene, library, textures, cam, env_sky_bg(), props, true, water.as_ref());
+        draw_all(
+            frame,
+            scene,
+            library,
+            textures,
+            cam,
+            env_sky_bg(),
+            props,
+            true,
+            water.as_ref(),
+            floor.as_ref(),
+        );
     };
     if threads <= 1 {
         let mut frame = Frame::new(w, h, env_sky_bg());
@@ -1130,9 +1207,59 @@ fn compose(
         h,
         sun: env.sun,
         sky: &env.sky,
+        flat_bg: if env.atmo {
+            None
+        } else {
+            Some(editor_backdrop_linear(env))
+        },
     };
     let mut hdr = hdr.to_vec();
     crate::raster::compose_env(&mut hdr, depth, &p)
+}
+
+/// The editor floor / sky backdrop as a LINEAR pre-exposure color whose
+/// tonemapped + gamma-encoded output is EXACTLY `env.backdrop` (sRGB):
+/// inverts autoexposure(sun.y) and tonemap y = 1.83c/(1.24c+1.68), then the
+/// gamma-2.0 encode (out = sqrt(c)). Floor and sky carry the same value, so
+/// both encode to the identical paper color.
+fn editor_backdrop_linear(env: &Environment) -> [f32; 3] {
+    let auto = engine::atmosphere::autoexposure(env.sun.y);
+    let inv = |y: f32| -> f32 {
+        // y = encoded sRGB target (0..1, post gamma-2). Reconstruct:
+        // pre-gamma c_f = y*y; c_post_tm = c_f / auto... order: out=sqrt(tm)
+        // so tm = y²; tm(c) = 1.83c/(1.24c+1.68) → c = 1.68·tm/(1.83−1.24·tm)
+        let tm = (y * y).clamp(0.0, 0.999);
+        let c = 1.68 * tm / (1.83 - 1.24 * tm).max(1e-6);
+        (c / auto).clamp(0.0, 64.0)
+    };
+    [inv(env.backdrop[0]), inv(env.backdrop[1]), inv(env.backdrop[2])]
+}
+
+/// The unlit editor floor: one big quad at y = −0.02 (just under the road
+/// surfaces), side 2·extent, albedo = the backdrop color. Drawn ONLY when
+/// the atmosphere is off (see render_env_buffers); `Frame::flat_floor`
+/// forces the fragment output to the raw albedo so it encodes to exactly
+/// the backdrop color and melts into the sky with no visible horizon.
+pub fn editor_extent(scene: &Scene, cam: &gdmath::OrbitCam) -> f32 {
+    (scene.radius_m * 3.0).max(500.0).max(cam.dist * 3.0)
+}
+
+fn build_editor_floor(env: &Environment, scene: &Scene, cam: &gdmath::OrbitCam) -> ScenePart {
+    let e = editor_extent(scene, cam);
+    ScenePart {
+        positions: vec![
+            Vec3::new(-e, -0.02, -e),
+            Vec3::new(e, -0.02, -e),
+            Vec3::new(-e, -0.02, e),
+            Vec3::new(e, -0.02, e),
+        ],
+        // two CCW triangles seen from above (+y)
+        indices: vec![0, 2, 1, 1, 2, 3],
+        color: [env.backdrop[0], env.backdrop[1], env.backdrop[2], 1.0],
+        vcolors: vec![],
+        uv: vec![],
+        tex: -1,
+    }
 }
 
 /// Single-cascade sun shadow map: an ortho fit around the camera target,
@@ -1364,7 +1491,7 @@ pub fn render_scene_shaded(
         let mut frame = Frame::new(w, h, bg);
         frame.shade = shade;
         draw_all(
-            &mut frame, scene, library, textures, cam, bg, extra, false, None,
+            &mut frame, scene, library, textures, cam, bg, extra, false, None, None,
         );
         return frame.color;
     }
@@ -1383,7 +1510,7 @@ pub fn render_scene_shaded(
                 s.spawn(move || {
                     let mut frame = Frame::band(w, bh, bg, yb, h);
                     frame.shade = shade;
-                    draw_all(&mut frame, scene, library, textures, cam, bg, extra, false, None);
+                    draw_all(&mut frame, scene, library, textures, cam, bg, extra, false, None, None);
                     frame
                 })
             })
@@ -1568,6 +1695,9 @@ fn draw_all(
     extra: &[PropDraw],
     env_mode: bool,
     water: Option<&ScenePart>,
+    // EDITOR look: when Some, the grass/terrain ground is SKIPPED and this
+    // unlit backdrop-colored quad is drawn instead (frame.flat_floor).
+    floor: Option<&ScenePart>,
 ) {
     if env_mode {
         // the atmosphere fog LUT replaces the legacy linear blend
@@ -1581,8 +1711,13 @@ fn draw_all(
         (cam.dist - scene.radius_m * 0.3).max(2.0),
         cam.dist + scene.radius_m * 3.4,
     );
+    // R16 FIX: the aspect must come from FULL_h — `frame.h` is the BAND
+    // height when rendering multithreaded (2 bands of 414px on this machine
+    // doubled the aspect and squeezed the whole render to ~50% width about
+    // the viewport centre, so the meshes no longer lined up with the
+    // screen-space overlays: the user's "points and render not aligned").
     let view = cam.view();
-    let proj = cam.proj(frame.w as f32 / frame.h.max(1) as f32);
+    let proj = cam.proj(frame.w as f32 / frame.full_h.max(1) as f32);
     let light = if env_mode {
         frame.light
     } else {
@@ -1620,7 +1755,31 @@ fn draw_all(
     };
 
     frame.ground_pass = env_mode;
-    for part in scene.ground.iter().chain(scene.parts.iter()) {
+    let ground_iter: Vec<&ScenePart> = if floor.is_some() {
+        Vec::new()
+    } else {
+        scene.ground.iter().collect()
+    };
+    if let Some(fl) = floor {
+        // the editor floor: unlit, exactly the backdrop color (see
+        // Frame::flat_floor in the env fragment)
+        frame.flat_floor = true;
+        frame.draw_mesh(
+            &fl.positions,
+            &fl.indices,
+            None,
+            None,
+            None,
+            &Mat4::IDENTITY,
+            &view,
+            &proj,
+            eye,
+            light,
+            fl.color,
+        );
+        frame.flat_floor = false;
+    }
+    for part in ground_iter.into_iter().chain(scene.parts.iter()) {
         // coarse bounds from a strided sample (the parts are per-strip, so a
         // 1-in-12 sample bounds the sphere tightly enough to cull)
         let n = part.positions.len();

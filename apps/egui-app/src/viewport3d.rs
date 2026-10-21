@@ -171,15 +171,22 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 }
 
                 ui.separator();
-                // R15 Egregoria environment: analytic sun clock + shadows
-                // + contour lines + Gerstner water
+                // R15 Egregoria environment: analytic sun clock + atmosphere
+                // (sky/fog) + shadows + contour lines + Gerstner water
+                if ui
+                    .toggle_value(&mut app.render.env_atmo, "sky")
+                    .on_hover_text("Egregoria atmosphere — sky gradient + aerial-perspective fog + sun disc. OFF = clean editor look: flat backdrop + unlit floor + full grid (default)")
+                    .changed()
+                {
+                    app.render.dirty = true;
+                }
                 if ui
                     .add(
                         egui::Slider::new(&mut app.render.env_time_h, 5.0..=21.0)
                             .integer()
                             .text("sun"),
                     )
-                    .on_hover_text("Time of day — drives the analytic sun, the atmosphere sky and the fog (Egregoria day model)")
+                    .on_hover_text("Time of day — drives the analytic sun (and the atmosphere sky + fog when the sky toggle is on)")
                     .changed()
                 {
                     app.render.dirty = true;
@@ -251,13 +258,29 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
             // R15 Egregoria environment: analytic sun (time of day),
             // atmosphere sky + fog LUTs, sun shadows, grass ground, optional
             // water plane and contour lines — replaces the flat ENV_DAY look.
+            // R16: the atmosphere is a TOGGLE (default off) — the editor
+            // default is the clean look: flat theme backdrop + unlit floor,
+            // no fog, so the grid overlay covers the whole ground.
             let water_level = if app.render.env_water { water_level_for(&scene) } else { None };
+            let tok = crate::theme::t(ui.ctx());
+            let backdrop = [
+                tok.input.r() as f32 / 255.0,
+                tok.input.g() as f32 / 255.0,
+                tok.input.b() as f32 / 255.0,
+            ];
             let env = roadkit::scene::Environment::new(
                 app.render.env_time_h * 3600.0,
                 app.render.env_shadows,
                 app.render.env_contours,
                 water_level,
+                app.render.env_atmo,
+                backdrop,
             );
+            // The view-space origin: the meshes were recentered by this
+            // offset when the scene was built — every document-space overlay
+            // (point gizmos, signal heads, turn labels, cursor pick) and
+            // every sim draw must subtract it to stay glued to the roads.
+            let (ox, oz) = (scene.origin[0] as f64, scene.origin[1] as f64);
             // traffic sim: advance one frame step and render its vehicles.
             // Two engines: the classic per-intersection TrafficSim and the
             // lane-graph simflow (FlowSim) — the toolbar toggles choose.
@@ -296,7 +319,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                         };
                         if let Some(idx) = app.assets.index.get(asset).copied() {
                             let model = Mat4::prop_model(
-                                Vec3::new(p.x as f32, p.y as f32, p.z as f32),
+                                Vec3::new((p.x - ox) as f32, p.y as f32, (p.z - oz) as f32),
                                 p.yaw as f32,
                                 1.0,
                             );
@@ -333,6 +356,13 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 if let Some(sim) = &mut app.render.sim {
                     sim.step(1.0 / 30.0, &curves);
                     extra = sim.draws(&curves, &app.assets);
+                    // the sim runs on RAW document curves — shift its draws
+                    // into scene space so the vehicles ride the recentered
+                    // road meshes
+                    for pd in extra.iter_mut() {
+                        pd.model.m[3] -= ox as f32;
+                        pd.model.m[11] -= oz as f32;
+                    }
                 }
             } else if app.render.sim.is_some() {
                 app.render.sim = None;
@@ -401,9 +431,11 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
 
             // ---- TerraZone ground grid (screen-space reference lines) ----
             // + the hovered cell's SURFACE highlight (R13: "the surface of
-            // the cursor on grid to be highlighted well")
+            // the cursor on grid to be highlighted well"). R16: in the
+            // editor look (atmosphere off) the grid covers the WHOLE floor.
             if app.render.show_grid {
-                draw_ground_grid(app, ui, rect, &scene);
+                let editor = !app.render.env_atmo;
+                draw_ground_grid(app, ui, rect, &scene, editor);
                 draw_grid_ruler(app, ui, rect);
                 draw_cursor_cell_highlight(app, ui, rect, &response);
             }
@@ -605,7 +637,7 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 egui::Align2::LEFT_TOP,
                 hud,
                 egui::FontId::monospace(11.0),
-                egui::Color32::from_rgba_unmultiplied(235, 235, 235, 220),
+                overlay_ink(crate::theme::t(ui.ctx()), 225),
             );
 
             // ---- 2D plan card riding ON TOP of the 3D view (bottom-left):
@@ -645,6 +677,7 @@ fn frame_sig(app: &RoadkitApp, w: usize, h: usize, extra: usize) -> u64 {
     app.render.env_shadows.hash(&mut hsh);
     app.render.env_contours.hash(&mut hsh);
     app.render.env_water.hash(&mut hsh);
+    app.render.env_atmo.hash(&mut hsh);
     w.hash(&mut hsh);
     h.hash(&mut hsh);
     extra.hash(&mut hsh);
@@ -948,6 +981,10 @@ fn draw_point_markers(
     let (w, h) = (rect.width(), rect.height());
     let view = cam.view();
     let proj = cam.proj(w / h);
+    // the scene-space origin: meshes were recentered by (origin) — the
+    // document-space RoadPoints must be shifted by the SAME offset or the
+    // gizmos float off the roads they label
+    let (ox, oz) = (scene.origin[0] as f64, scene.origin[1] as f64);
     // world (x, y, z) -> screen, exactly the raster's projection (the same
     // transform the ground grid uses)
     let xform = |x: f64, y: f64, z: f64| -> Option<(egui::Pos2, f32)> {
@@ -973,6 +1010,32 @@ fn draw_point_markers(
 
     // ---- collect the visible points ----
     let mut markers: Vec<PtMarker> = Vec::new();
+    let dbg_markers = std::env::var("RK_DEBUG_MARKERS").is_ok();
+    if dbg_markers {
+        eprintln!(
+            "[markers] origin=({ox:.2},{oz:.2}) cam yaw={:.3} pitch={:.3} dist={:.1} target=({:.1},{:.1},{:.1})",
+            cam.yaw,
+            cam.pitch,
+            cam.dist,
+            cam.target.x,
+            cam.target.y,
+            cam.target.z
+        );
+        for (ci, c) in app.scene.borrow().curves.iter().enumerate() {
+            let pts = c.centerline(6.0);
+            for (k, q) in pts.iter().enumerate() {
+                if k % 4 != 0 {
+                    continue;
+                }
+                if let Some((sp, depth)) = xform(q.x as f64 - ox, q.y as f64, q.z as f64 - oz) {
+                    eprintln!(
+                        "[center] c{ci} s#{} doc=({:.1},{:.1},{:.1}) screen=({:.0},{:.0}) depth={:.1}",
+                        k, q.x, q.y, q.z, sp.x, sp.y, depth
+                    );
+                }
+            }
+        }
+    }
     {
         let sc = app.scene.borrow();
         for (ci, c) in sc.curves.iter().enumerate() {
@@ -984,13 +1047,26 @@ fn draw_point_markers(
                 if !p.visible {
                     continue; // point eye
                 }
-                let Some((pos, depth)) = xform(p.x, p.elev + 0.06, p.z) else {
+                let Some((pos, depth)) = xform(p.x - ox, p.elev + 0.06, p.z - oz) else {
                     continue;
                 };
                 if pos.x < rect.left() - 8.0 || pos.x > rect.right() + 8.0 || pos.y < rect.top() - 8.0 || pos.y > rect.bottom() + 8.0 {
                     continue;
                 }
                 let name = if p.name.is_empty() { format!("RP_{:03}", pi + 1) } else { p.name.clone() };
+                if dbg_markers {
+                    eprintln!(
+                        "[markers] doc=({:.1},{:.1},{:.1}) scene=({:.1},{:.1}) screen=({:.0},{:.0}) depth={:.1}",
+                        p.x,
+                        p.elev,
+                        p.z,
+                        p.x - ox,
+                        p.z - oz,
+                        pos.x,
+                        pos.y,
+                        depth
+                    );
+                }
                 markers.push(PtMarker {
                     pos,
                     depth,
@@ -1041,7 +1117,11 @@ fn draw_point_markers(
                 (Vec3::new(0.0, 1.0, 0.0), "Y", egui::Color32::from_rgb(140, 190, 50)),
                 (Vec3::new(0.0, 0.0, 1.0), "Z", egui::Color32::from_rgb(70, 120, 210)),
             ] {
-                let Some((tip, _)) = xform(m.wx + axis.x as f64 * L, m.wy + axis.y as f64 * L, m.wz + axis.z as f64 * L) else {
+                let Some((tip, _)) = xform(
+                    m.wx - ox + axis.x as f64 * L,
+                    m.wy + axis.y as f64 * L,
+                    m.wz - oz + axis.z as f64 * L,
+                ) else {
                     continue;
                 };
                 let mut dv = tip - m.pos;
@@ -1068,7 +1148,7 @@ fn draw_point_markers(
                 egui::Align2::LEFT_BOTTOM,
                 format!("{} · {}  ({:.1}, {:.1}, {:.1})", m.name, m.cname, m.wx, m.wy, m.wz),
                 egui::FontId::monospace(10.5),
-                egui::Color32::from_rgba_unmultiplied(240, 242, 248, 235),
+                overlay_ink(t, 240),
             );
         }
     }
@@ -1106,7 +1186,7 @@ fn draw_point_markers(
                         egui::Align2::LEFT_BOTTOM,
                         format!("{} · {}  ({:.1}, {:.1}, {:.1}) — click to select", pick.name, pick.cname, pick.wx, pick.wy, pick.wz),
                         egui::FontId::monospace(10.5),
-                        egui::Color32::from_rgba_unmultiplied(235, 238, 245, 240),
+                        overlay_ink(egui_kit::tokens(ui.ctx()), 245),
                     );
                 }
             }
@@ -1144,6 +1224,16 @@ struct PtPick {
 
 fn painter_clip(ui: &egui::Ui, rect: egui::Rect) -> egui::Rect {
     ui.clip_rect().intersect(rect)
+}
+
+/// Overlay text ink that reads on BOTH theme papers: near-white on the
+/// dark charcoals, near-black on the light VectorCraft papers.
+fn overlay_ink(t: egui_kit::Tokens, a: u8) -> egui::Color32 {
+    if t.dark {
+        egui::Color32::from_rgba_unmultiplied(235, 238, 245, a)
+    } else {
+        egui::Color32::from_rgba_unmultiplied(28, 30, 36, a)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1190,7 +1280,7 @@ fn grid_spacing(dist: f32, scene_radius: f32) -> f32 {
 /// z-fight and never blob at the crossings. Anchored at the scene centre
 /// and clipped to the ground's own reach (grass fan = disc, terrain =
 /// square) so lines never float off the ground onto the sky haze.
-fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &roadkit::Scene) {
+fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &roadkit::Scene, editor: bool) {
     let cam = &app.cam;
     let (w, h) = (rect.width(), rect.height());
     let view = cam.view();
@@ -1213,18 +1303,28 @@ fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &r
             -v.z,
         ))
     };
-    // the raster's exact distance fog (draw_all): content fades to the haze
-    // between these two camera depths — the lines must ride the SAME fade
-    // or they float over fully-fogged ground
-    let fog_start = cam.dist + scene.radius_m * 0.55;
-    let fog_end = cam.dist + scene.radius_m * 3.4;
+    // R16 editor look (atmosphere off): the unlit floor extends to
+    // editor_extent — the grid rides the SAME extent, so it covers the
+    // whole visible ground ("full grid", not a patch around the target)
+    let e = if editor {
+        roadkit::scene::editor_extent(scene, cam)
+    } else {
+        scene.ground_extent
+    };
+    // the raster's distance haze: in the editor look there IS no fog — the
+    // far lines just fade gently toward the horizon so they don't alias
+    let (fog_start, fog_end) = if editor {
+        (cam.dist + e * 0.55, cam.dist + e * 1.9)
+    } else {
+        (cam.dist + scene.radius_m * 0.55, cam.dist + scene.radius_m * 3.4)
+    };
 
     let target = cam.target;
     let s = grid_spacing(cam.dist, scene.radius_m);
-    let e = scene.ground_extent;
     // flat ground = the radial grass fan (disc); terrain = the square
-    // heightfield — each mode clips its lines to its own shape
-    let disc = scene.sampler.is_none();
+    // heightfield — each mode clips its lines to its own shape. The editor
+    // floor is a square: clip the lines to the same square.
+    let disc = !editor && scene.sampler.is_none();
     let lift = 0.03f32;
     let height = |x: f32, z: f32| -> f32 {
         scene
@@ -1237,8 +1337,16 @@ fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &r
     // the lines must end BEFORE the ground melts into the sky haze — an
     // alpha-faded black line still contrasts against the near-sky ground,
     // so the strength is cut to zero while the ground is still clearly
-    // green (the fan melts from 72%, the Chebyshev heightfield from 35%)
-    let (rim_a, rim_b) = if disc { (0.55f32, 0.70f32) } else { (0.32f32, 0.55f32) };
+    // green (the fan melts from 72%, the Chebyshev heightfield from 35%).
+    // The editor floor never melts (it IS the backdrop) — only a whisper
+    // of fade at the outermost edge so the square never shows a hard end.
+    let (rim_a, rim_b) = if editor {
+        (0.86f32, 0.99f32)
+    } else if disc {
+        (0.55f32, 0.70f32)
+    } else {
+        (0.32f32, 0.55f32)
+    };
     let fade = |x: f32, z: f32| -> f32 {
         let t = if disc {
             (x * x + z * z).sqrt() / e
@@ -1254,6 +1362,16 @@ fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &r
             cam.dist, target.x, target.y, target.z, scene.radius_m);
     }
     let painter = ui.painter();
+    // theme-aware line color: dark ink on the light paper, light ink on the
+    // dark charcoal (the grid must read on BOTH VectorCraft brightnesses)
+    let tok = crate::theme::t(ui.ctx());
+    let line_col = move |a: u8| {
+        if tok.dark {
+            egui::Color32::from_white_alpha(a)
+        } else {
+            egui::Color32::from_black_alpha(a)
+        }
+    };
     // one ground-hugging polyline from (ax, az) to (bx, bz) inside the
     // ground shape; runs break at the near plane. `base` = the line's
     // alpha at the centre (melted out toward the rim)
@@ -1277,10 +1395,7 @@ fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &r
                     continue;
                 }
                 if let Some(q) = prev {
-                    painter.line_segment(
-                        [q, p],
-                        egui::Stroke::new(width, egui::Color32::from_black_alpha(a as u8)),
-                    );
+                    painter.line_segment([q, p], egui::Stroke::new(width, line_col(a as u8)));
                 }
                 prev = Some(p);
             } else {
@@ -1289,10 +1404,16 @@ fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &r
         }
     };
     // only lines near the view (TerraZone's 28-cell window), anchored at
-    // the scene centre like TerraZone anchors at the scene's position
-    const VIEW_CELLS: f32 = 28.0;
-    let line_lo = |t: f32| ((t - VIEW_CELLS * s) / s).floor() as i32;
-    let line_hi = |t: f32| ((t + VIEW_CELLS * s) / s).ceil() as i32;
+    // the scene centre like TerraZone anchors at the scene's position.
+    // EDITOR: cover the WHOLE visible ground — the window scales with the
+    // zoom so the grid always fills the viewport edge to edge.
+    let view_cells = if editor {
+        ((cam.dist * 5.0 / s).ceil() as f32).clamp(28.0, 320.0)
+    } else {
+        28.0
+    };
+    let line_lo = |t: f32| ((t - view_cells * s) / s).floor() as i32;
+    let line_hi = |t: f32| ((t + view_cells * s) / s).ceil() as i32;
 
     for i in line_lo(target.x)..=line_hi(target.x) {
         let x = i as f32 * s;
@@ -1429,7 +1550,11 @@ fn draw_cursor_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, resp
         app.cursor_world = None;
         return;
     };
-    app.cursor_world = Some([wx, wy, wz]);
+    // the ground hit is in SCENE space (the camera orbits the recentered
+    // meshes) — the document is NOT recentered, so convert the pick back to
+    // document coords or AddPoint places points at the wrong spot
+    let (ox, oz) = view_origin(app);
+    app.cursor_world = Some([wx + ox, wy, wz + oz]);
 
     let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
     let base = match oc.xform(wx, wy, wz) {
@@ -1458,21 +1583,44 @@ fn draw_cursor_gizmo(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, resp
         painter.line_segment([base, end], egui::Stroke::new(1.6, col.gamma_multiply(0.95)));
         painter.text(end + dv.normalized() * 8.0, egui::Align2::CENTER_CENTER, letter, egui::FontId::proportional(10.0), col);
     }
-    painter.circle_filled(base, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
-    painter.circle_stroke(base, 5.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 90)));
+    let tok = crate::theme::t(ui.ctx());
+    let (dot, ring) = if tok.dark {
+        (
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 90),
+        )
+    } else {
+        (
+            egui::Color32::from_rgba_unmultiplied(28, 30, 36, 220),
+            egui::Color32::from_rgba_unmultiplied(28, 30, 36, 90),
+        )
+    };
+    painter.circle_filled(base, 3.0, dot);
+    painter.circle_stroke(base, 5.0, egui::Stroke::new(1.0, ring));
     painter.text(
         base + egui::vec2(12.0, -12.0),
         egui::Align2::LEFT_BOTTOM,
-        format!("x {:.1} · y {:.1} · z {:.1}", wx, wy, wz),
+        format!("x {:.1} · y {:.1} · z {:.1}", wx + ox, wy, wz + oz),
         egui::FontId::monospace(10.5),
-        egui::Color32::from_rgba_unmultiplied(235, 235, 235, 230),
+        overlay_ink(egui_kit::tokens(ui.ctx()), 235),
     );
+}
+
+/// The recentering offset of the current render scene (doc → scene = p −
+/// origin; scene → doc = p + origin). Zero before the first scene build.
+fn view_origin(app: &RoadkitApp) -> (f64, f64) {
+    app.render
+        .scene3d
+        .as_ref()
+        .map(|s| (s.origin[0] as f64, s.origin[1] as f64))
+        .unwrap_or((0.0, 0.0))
 }
 
 /// Closest elevated RoadPoint (bridge deck) under the pointer — used to
 /// snap the cursor plane onto flyover decks.
 fn nearest_elevated_point(app: &RoadkitApp, pointer: egui::Pos2, oc: &OverlayCam) -> Option<(usize, usize)> {
     let sc = app.scene.borrow();
+    let (ox, oz) = view_origin(app);
     let mut best: Option<(f32, usize, usize)> = None;
     for (ci, c) in sc.curves.iter().enumerate() {
         if !c.visible || !c.has_elevated() {
@@ -1482,7 +1630,7 @@ fn nearest_elevated_point(app: &RoadkitApp, pointer: egui::Pos2, oc: &OverlayCam
             if !p.elevated() {
                 continue;
             }
-            let Some((sp, depth)) = oc.xform(p.x, p.elev, p.z) else { continue };
+            let Some((sp, depth)) = oc.xform(p.x - ox, p.elev, p.z - oz) else { continue };
             let d = (sp - pointer).length();
             if d < 26.0 && best.map(|(bd, _, _)| d < bd).unwrap_or(true) {
                 best = Some((d, ci, pi));
@@ -1499,6 +1647,7 @@ fn draw_traffic_lights(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, re
     let pointer = response.hover_pos().unwrap_or(egui::Pos2::new(f32::NAN, f32::NAN));
     let oc = OverlayCam::new(app, rect);
     let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
+    let (ox, oz) = view_origin(app);
     let fog_start = app.cam.dist + app.render.scene3d.as_ref().map(|s| s.radius_m).unwrap_or(100.0) * 0.55;
     let fog_end = app.cam.dist + app.render.scene3d.as_ref().map(|s| s.radius_m).unwrap_or(100.0) * 3.4;
     let fog = |depth: f32| 1.0 - ((depth - fog_start) / (fog_end - fog_start)).clamp(0.0, 1.0);
@@ -1511,8 +1660,8 @@ fn draw_traffic_lights(app: &mut RoadkitApp, ui: &egui::Ui, rect: egui::Rect, re
             .find(|o| o.junction == lp.junction && o.group == lp.group && o.positive_dir == lp.positive_dir)
             .map(|o| (o.dx, o.dz))
             .unwrap_or((0.0, 0.0));
-        let x = lp.x + dx;
-        let z = lp.z + dz;
+        let x = lp.x + dx - ox;
+        let z = lp.z + dz - oz;
         let state = sim.light_state(lp.junction, lp.group).unwrap_or(SignalState::Off);
         let f = 0.35f64;
         let (head_p, depth) = match oc.xform(x, lp.elev + f + 3.1, z) {
@@ -1581,8 +1730,9 @@ fn draw_turn_labels(
 ) {
     let oc = OverlayCam::new(app, rect);
     let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
+    let (ox, oz) = view_origin(app);
     for (x, z, y, label) in sim.approach_labels(curves, junction) {
-        let Some((p, depth)) = oc.xform(x, y + 0.25, z) else { continue };
+        let Some((p, depth)) = oc.xform(x - ox, y + 0.25, z - oz) else { continue };
         if !rect.contains(p) {
             continue;
         }
@@ -1619,11 +1769,12 @@ fn draw_grid_ruler(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect) {
     }
     let p0 = egui::Pos2::new(rect.right() - 24.0 - len, rect.bottom() - 26.0);
     let p1 = egui::Pos2::new(rect.right() - 24.0, rect.bottom() - 26.0);
-    painter.line_segment([p0, p1], egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(240, 240, 240, 200)));
+    let ink = overlay_ink(egui_kit::tokens(ui.ctx()), 210);
+    painter.line_segment([p0, p1], egui::Stroke::new(2.0, ink));
     for p in [p0, p1] {
         painter.line_segment(
             [egui::Pos2::new(p.x, p.y - 4.0), egui::Pos2::new(p.x, p.y + 4.0)],
-            egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(240, 240, 240, 200)),
+            egui::Stroke::new(2.0, ink),
         );
     }
     painter.text(
@@ -1631,7 +1782,7 @@ fn draw_grid_ruler(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect) {
         egui::Align2::CENTER_BOTTOM,
         "10 m",
         egui::FontId::monospace(10.0),
-        egui::Color32::from_rgba_unmultiplied(240, 240, 240, 210),
+        ink,
     );
     // axis letters along the world axes through the camera target
     if let Some((ax, _)) = oc.xform(t.x as f64 + 40.0, 0.05, t.z as f64) {

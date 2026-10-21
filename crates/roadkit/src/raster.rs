@@ -154,6 +154,9 @@ pub struct Frame {
     pub depth_only: bool,
     /// normalized light (sun) direction for env shading
     pub light: Vec3,
+    /// EDITOR floor: output the raw albedo unlit (exactly the backdrop
+    /// color after the compose tonemap — no sun, no fog, no shadows)
+    pub flat_floor: bool,
 }
 
 impl Frame {
@@ -193,6 +196,7 @@ impl Frame {
             water: false,
             depth_only: false,
             light: Vec3::new(0.4, 0.85, 0.3).normalized(),
+            flat_floor: false,
         };
         f.clear(bg);
         f
@@ -656,6 +660,18 @@ fn env_fragment(
         [cr * cr, cg * cg, cb * cb]
     };
 
+    // EDITOR floor: unlit, exactly the backdrop color (linear). The compose
+    // pass applies the same autoexposure+tonemap to it as to the flat sky,
+    // so floor and backdrop encode to the identical paper color.
+    if f.flat_floor {
+        f.depth[idx] = z;
+        let o = idx * 3;
+        f.hdr[o] = al[0];
+        f.hdr[o + 1] = al[1];
+        f.hdr[o + 2] = al[2];
+        return;
+    }
+
     // analytic sun (engine::sun): ambient + sun_col * max(n·l) * shadow.
     // Shadows are SOFTENED (0.35 floor) like Egregoria's ambient/IBL keeps
     // shadowed ground lit by the sky — never pure black.
@@ -896,6 +912,9 @@ pub struct EnvCompose<'a> {
     /// normalized sun direction (y up)
     pub sun: Vec3,
     pub sky: &'a SkyLut,
+    /// EDITOR look: flat linear backdrop for sky pixels (no LUT, no sun
+    /// disc). None = the full Egregoria atmosphere.
+    pub flat_bg: Option<[f32; 3]>,
 }
 
 /// Final Egregoria compose over a linear HDR buffer + depth:
@@ -920,11 +939,18 @@ pub fn compose_env(hdr: &mut [f32], depth: &[f32], p: &EnvCompose) -> Vec<u8> {
                 let vy = p.view.m[1] * dx + p.view.m[5] * dy + p.view.m[9] * dz;
                 let vz = p.view.m[2] * dx + p.view.m[6] * dy + p.view.m[10] * dz;
                 let dir = Vec3::new(vx, vy, vz).normalized();
-                let mut c = p.sky.sample(dir);
-                let disc = engine::atmosphere::sun_disc(p.sun, dir);
-                c[0] += disc;
-                c[1] += disc;
-                c[2] += disc;
+                let c = match p.flat_bg {
+                    // EDITOR look: flat paper — no sky LUT, no sun disc
+                    Some(bg) => bg,
+                    None => {
+                        let mut c = p.sky.sample(dir);
+                        let disc = engine::atmosphere::sun_disc(p.sun, dir);
+                        c[0] += disc;
+                        c[1] += disc;
+                        c[2] += disc;
+                        c
+                    }
+                };
                 hdr[o3] = c[0];
                 hdr[o3 + 1] = c[1];
                 hdr[o3 + 2] = c[2];
