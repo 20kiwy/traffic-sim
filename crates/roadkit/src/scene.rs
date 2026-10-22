@@ -1072,6 +1072,62 @@ pub fn render_env_props_shaded(
     }
 }
 
+/// `render_env_shaded` that ALSO returns the raster's view-depth buffer
+/// (w×h, view-space z: negative in front of the camera, larger = closer,
+/// NEG_INFINITY = nothing drawn there). The editor's screen-space ground
+/// grid depth-tests against it — the VectorCraft layering law: the grid is
+/// the BOTTOM layer and the roads/bridges are seen on top of it.
+#[allow(clippy::too_many_arguments)]
+pub fn render_env_shaded_depth(
+    scene: &Scene,
+    library: &AssetLibrary,
+    textures: &TextureLibrary,
+    cam: &gdmath::OrbitCam,
+    w: usize,
+    h: usize,
+    env: &Environment,
+    extra: &[PropDraw],
+    show_props: bool,
+    shade: ShadeMode,
+) -> (Vec<u8>, Vec<f32>) {
+    if shade == ShadeMode::Quality {
+        let (hdr, depth) = render_env_buffers(
+            scene, library, textures, cam, w * 2, h * 2, env, extra, show_props,
+        );
+        let (hdr, depth) = box_downsample_f32(&hdr, &depth, w * 2, h * 2, 2);
+        let rgba = compose(&hdr, &depth, w, h, cam, env);
+        return (rgba, depth);
+    }
+    let (hdr, depth) = render_env_buffers(scene, library, textures, cam, w, h, env, extra, show_props);
+    let rgba = compose(&hdr, &depth, w, h, cam, env);
+    (rgba, depth)
+}
+
+/// `render_env_shaded_depth` with the props toggle (the app's entry).
+#[allow(clippy::too_many_arguments)]
+pub fn render_env_props_shaded_depth(
+    scene: &Scene,
+    library: &AssetLibrary,
+    textures: &TextureLibrary,
+    cam: &gdmath::OrbitCam,
+    w: usize,
+    h: usize,
+    env: &Environment,
+    extra: &[PropDraw],
+    show_props: bool,
+    shade: ShadeMode,
+) -> (Vec<u8>, Vec<f32>) {
+    if show_props {
+        render_env_shaded_depth(scene, library, textures, cam, w, h, env, extra, true, shade)
+    } else {
+        let mut bare = scene.clone();
+        bare.props.clear();
+        let empty: Vec<PropDraw> = Vec::new();
+        let ex: &[PropDraw] = if extra.is_empty() { &empty } else { extra };
+        render_env_shaded_depth(&bare, library, textures, cam, w, h, env, ex, false, shade)
+    }
+}
+
 /// Raster the environment path into (linear HDR rgb3, view-depth).
 #[allow(clippy::too_many_arguments)]
 fn render_env_buffers(

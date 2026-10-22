@@ -19,3 +19,9 @@
 [submodule "clone/rtron"]
 	path = clone/rtron
 	url = https://github.com/tum-gis/rtron.git
+[submodule "clone/vectorcraft"]
+	path = clone/vectorcraft
+	url = https://github.com/storytold/vectorcraft.git
+[submodule "clone/cadcraft"]
+	path = clone/cadcraft
+	url = https://github.com/storytold/cadcraft.git

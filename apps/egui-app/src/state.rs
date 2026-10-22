@@ -217,6 +217,14 @@ pub struct RenderState {
     /// sun disc). OFF = the clean editor look: flat theme backdrop, unlit
     /// floor, no fog — the full-grid editor the user asked for.
     pub env_atmo: bool,
+    /// R18 VectorCraft layering law: the scene's view-depth buffer (raster
+    /// resolution, view-space z, larger = closer) captured with the last
+    /// render — the screen-space ground grid depth-tests against it so the
+    /// roads/bridges (closer to the eye than the ground plane) OCCLUDE the
+    /// grid lines: the grid is the BOTTOM layer, the roads are seen on top.
+    pub depth: Option<std::sync::Arc<Vec<f32>>>,
+    /// the depth buffer's raster dimensions (matches the cached texture)
+    pub depth_size: (usize, usize),
 }
 
 impl Default for RenderState {
@@ -244,6 +252,8 @@ impl Default for RenderState {
             env_shadows: true,
             env_contours: true,
             env_water: false,
+            depth: None,
+            depth_size: (0, 0),
             env_atmo: false,
         }
     }
@@ -1079,61 +1089,15 @@ impl RoadkitApp {
     }
 
     /// Stamp the selected asset at the given world position on the nearest
-    /// curve (Stamp tool).
-    pub fn stamp_at(&mut self, x: f64, z: f64) {
+    /// curve (Stamp tool) — R18: DISABLED. The user's standing request:
+    /// "remove trees placement for now so to see only road and bridges —
+    /// no stamping, remove all". The tool reports why nothing is placed.
+    pub fn stamp_at(&mut self, _x: f64, _z: f64) {
         let asset = self.stamp_asset.clone();
-        let lateral = self.stamp_lateral;
-
-        // find the nearest curve to the click
-        let mut best: Option<(f64, usize, f64)> = None; // (dist, curve idx, s)
-        {
-            let sc = self.scene.borrow();
-            for (i, c) in sc.curves.iter().enumerate() {
-                if let Some((s, d)) = c.closest_s(x, z) {
-                    if best.map(|(bd, _, _)| d < bd).unwrap_or(true) {
-                        best = Some((d, i, s));
-                    }
-                }
-            }
-        }
-
-        let Some((d, ci, s)) = best else {
-            self.scene
-                .borrow_mut()
-                .log("[edit] no road found — build one first (run the script or use Add RoadPoint)");
-            return;
-        };
-        if d > 40.0 {
-            self.scene.borrow_mut().log(format!(
-                "[edit] too far from any road ({d:.0} m) — click on a road to stamp"
-            ));
-            return;
-        }
-
-        // compute the prop while the borrow is alive
-        let placed: Option<(roadkit::PropInstance, String, f64)> = {
-            let sc = self.scene.borrow();
-            let curve = &sc.curves[ci];
-            let length = curve.length_m();
-            if length <= 0.0 {
-                None
-            } else {
-                let t = (s / length).clamp(0.0, 1.0);
-                roadkit::stamp(curve, &asset, t, lateral, true, 1.0)
-                    .map(|p| (p, curve.name.clone(), t))
-            }
-        };
-
-        if let Some((prop, cname, t)) = placed {
-            let mut sc = self.scene.borrow_mut();
-            sc.props.push(prop);
-            sc.dirty = true;
-            sc.log(format!(
-                "[props] stamped {asset} on '{cname}' at {t:.2} (lateral {lateral:.1} m)"
-            ));
-            drop(sc);
-            self.render.dirty = true;
-        }
+        self.scene.borrow_mut().log(format!(
+            "[props] stamping disabled (roads + bridges only) — {asset} not placed"
+        ));
+        self.status = "Props disabled — roads + bridges only".to_string();
     }
 
     /// Delete the selected road point.
@@ -1830,74 +1794,22 @@ impl eframe::App for RoadkitApp {
 
 
 impl RoadkitApp {
-    /// The "Join GLB props like Godot" bulk action (GRG-style dressing):
-    /// vehicles + streetlights + trees + milestones joined along every road.
+    /// The "Join GLB props like Godot" bulk action — R18: DISABLED.
+    /// The user's standing request: "remove trees placement for now so to
+    /// see only road and bridges — no stamping, remove all". The action now
+    /// CLEARS any props left in the scene (roads + bridges only) instead of
+    /// dressing the roads.
     pub fn join_props_like_godot(&mut self) {
-        use roadkit::JoinParams;
-        let curves = self.scene.borrow().curves.clone();
-        let mut out: Vec<roadkit::PropInstance> = Vec::new();
-        for c in &curves {
-            if c.points.len() < 2 {
-                continue;
-            }
-            let lat = c.paved_width() / 2.0;
-            let seed = self.run_counter.wrapping_mul(2654435761).wrapping_add(c.name.len() as u64);
-            let vehicle = JoinParams {
-                spacing: 90.0,
-                lateral: lat * 0.5,
-                alternate: true,
-                align: true,
-                scale: 1.0,
-                jitter: 0.25,
-                random_yaw: false,
-                seed: seed + 1,
-            };
-            out.extend(roadkit::join_along(c, "vehicle", &vehicle));
-
-            let street = JoinParams {
-                spacing: 32.0,
-                lateral: lat + 2.0,
-                alternate: true,
-                align: true,
-                scale: 1.0,
-                jitter: 0.0,
-                random_yaw: false,
-                seed: seed + 2,
-            };
-            out.extend(roadkit::join_along(c, "streetlight", &street));
-
-            let trees = JoinParams {
-                spacing: 17.0,
-                lateral: lat + 5.0,
-                alternate: true,
-                align: false,
-                scale: 1.0,
-                jitter: 0.35,
-                random_yaw: true,
-                seed: seed + 3,
-            };
-            out.extend(roadkit::join_along(c, "tree", &trees));
-
-            let miles = JoinParams {
-                spacing: 120.0,
-                lateral: 3.5,
-                alternate: false,
-                align: true,
-                scale: 1.0,
-                jitter: 0.0,
-                random_yaw: false,
-                seed: seed + 4,
-            };
-            out.extend(roadkit::join_along(c, "milestone", &miles));
-        }
-        let added = out.len();
         let mut sc = self.scene.borrow_mut();
-        sc.props.extend(out);
+        let removed = sc.props.len();
+        sc.props.clear();
         sc.dirty = true;
         let curves_n = sc.curves.len();
-        sc.log(format!("[props] joined {added} GLB props across {curves_n} curves (GRG-style dressing)"));
+        sc.log(format!(
+            "[props] stamping disabled (roads + bridges only) — cleared {removed} props across {curves_n} curves"
+        ));
         drop(sc);
         self.render.dirty = true;
-        self.status = format!("{added} GLB props joined like Godot");
+        self.status = "Props disabled — roads + bridges only".to_string();
     }
 }

@@ -387,7 +387,10 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     // props hidden: render without prop draws (no scene clone)
                     &scene
                 };
-                rgba = roadkit::scene::render_env_props_shaded(
+                // R18: keep the raster's view-depth buffer — the ground grid
+                // and the cursor cell highlight depth-test against it (the
+                // VectorCraft layering law: grid = BOTTOM layer, roads on top)
+                let (buf, depth) = roadkit::scene::render_env_props_shaded_depth(
                     target,
                     &app.assets,
                     &app.textures,
@@ -399,6 +402,9 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                     app.render.show_props,
                     app.render.shading,
                 );
+                app.render.depth = Some(std::sync::Arc::new(depth));
+                app.render.depth_size = (rw, rh);
+                rgba = buf;
                 app.render.render_ms = t0.elapsed().as_secs_f32() * 1000.0;
                 if std::env::var("ROADKIT_DUMP_PNG").is_ok() {
                     let _ = std::fs::write("/tmp/app_render.raw", &rgba);
@@ -429,15 +435,22 @@ pub fn content(app: &mut RoadkitApp, ctx: &egui::Context) {
                 egui::Color32::WHITE,
             );
 
-            // ---- TerraZone ground grid (screen-space reference lines) ----
-            // + the hovered cell's SURFACE highlight (R13: "the surface of
-            // the cursor on grid to be highlighted well"). R16: in the
-            // editor look (atmosphere off) the grid covers the WHOLE floor.
+            // ---- ground grid (screen-space reference lines) — R18 DEPTH
+            //      TESTED: each grid sample checks the raster's view-depth
+            //      buffer, so roads/bridges/vehicles (closer to the eye than
+            //      the ground plane) OCCLUDE the lines — the VectorCraft
+            //      layering law: the grid is the BOTTOM layer, the roads are
+            //      seen on top. Same for the hovered cell's surface
+            //      highlight. "the grid to be bottom and the other to be
+            //      seen on top on 2d and 3d"
             if app.render.show_grid {
                 let editor = !app.render.env_atmo;
-                draw_ground_grid(app, ui, rect, &scene, editor);
+                let depth: Option<&[f32]> =
+                    app.render.depth.as_ref().map(|a| a.as_slice());
+                let (dw, dh) = app.render.depth_size;
+                draw_ground_grid(app, ui, rect, &scene, editor, depth, (dw, dh));
                 draw_grid_ruler(app, ui, rect);
-                draw_cursor_cell_highlight(app, ui, rect, &response);
+                draw_cursor_cell_highlight(app, ui, rect, &response, depth, (dw, dh));
             }
 
             // ---- RoadPoint markers: click to select, XYZ tripod on the
@@ -1273,14 +1286,62 @@ fn grid_spacing(dist: f32, scene_radius: f32) -> f32 {
 /// strokes through the SAME view/projection as the CPU raster, so the lines
 /// hug the heightfield, never alias, never z-fight and never blob at the
 /// crossings.
+/// R18 — VectorCraft layering law: is the world point whose screen position
+/// is `p` at view distance `dist` HIDDEN behind scene geometry? Samples the
+/// raster's view-depth buffer (`render_env_*_depth`, captured with the last
+/// frame render): stored values are view-space z (negative in front of the
+/// camera, larger = closer, NEG_INFINITY = nothing drawn). The point is
+/// occluded when the stored surface is meaningfully closer than it — road
+/// decks sit 0.05 m above the ground plane, so an epsilon below that keeps
+/// the grid visible on open ground while every road/bridge/vehicle covers
+/// its own grid lines ("the grid to be bottom and the other to be seen on
+/// top").
+fn occluded_by_scene(
+    depth: Option<&[f32]>,
+    dims: (usize, usize),
+    rect: egui::Rect,
+    p: egui::Pos2,
+    dist: f32,
+) -> bool {
+    let Some(buf) = depth else {
+        return false;
+    };
+    let (dw, dh) = dims;
+    if dw == 0 || dh == 0 {
+        return false;
+    }
+    let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
+    let dx = (((p.x - rect.min.x) / w * dw as f32).floor()).clamp(0.0, (dw - 1) as f32) as usize;
+    let dy = (((p.y - rect.min.y) / h * dh as f32).floor()).clamp(0.0, (dh - 1) as f32) as usize;
+    let z = buf[dy * dw + dx];
+    if z == f32::NEG_INFINITY {
+        return false; // nothing rendered there — the point is seen
+    }
+    // occluded iff the stored surface is at least eps closer than the point
+    let eps = 0.03 + dist * 0.0004;
+    z >= -dist + eps
+}
+
 /// The X/Z ground grid over the rendered engine terrain — TerraZone's
-/// `draw_ground_grid` copied in: screen-space metre lines, thin and faint,
+/// `draw_ground_grid`: screen-space metre lines, thin and faint,
 /// with the two centre lines stronger. Through the SAME view/projection as
 /// the CPU raster so the lines hug the heightfield, never alias, never
 /// z-fight and never blob at the crossings. Anchored at the scene centre
 /// and clipped to the ground's own reach (grass fan = disc, terrain =
 /// square) so lines never float off the ground onto the sky haze.
-fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &roadkit::Scene, editor: bool) {
+/// R18 VectorCraft layering law: every sample DEPTH-TESTS against the
+/// scene (`occluded_by_scene`) so the grid is the BOTTOM layer — roads,
+/// bridges and vehicles are seen on top of it, in 3D exactly like the 2D
+/// plan already draws it (grid first, roads after).
+fn draw_ground_grid(
+    app: &RoadkitApp,
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    scene: &roadkit::Scene,
+    editor: bool,
+    depth: Option<&[f32]>,
+    dims: (usize, usize),
+) {
     let cam = &app.cam;
     let (w, h) = (rect.width(), rect.height());
     let view = cam.view();
@@ -1325,7 +1386,11 @@ fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &r
     // heightfield — each mode clips its lines to its own shape. The editor
     // floor is a square: clip the lines to the same square.
     let disc = !editor && scene.sampler.is_none();
-    let lift = 0.03f32;
+    // R18: the grid lies ON the ground plane (lift 0) — the depth test
+    // (eps 0.03) needs the road decks (elev + 0.05) strictly closer than
+    // the grid samples, while the coplanar floor never occludes its own
+    // reference lines.
+    let lift = 0.0f32;
     let height = |x: f32, z: f32| -> f32 {
         scene
             .sampler
@@ -1387,8 +1452,14 @@ fn draw_ground_grid(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, scene: &r
         for k in 0..=steps {
             let t = k as f32 / steps as f32;
             let (x, z) = (ax + (bx - ax) * t, az + (bz - az) * t);
-            if let Some((p, depth)) = xform([x, height(x, z), z]) {
-                let fog = ((depth - fog_start) / (fog_end - fog_start)).clamp(0.0, 1.0);
+            if let Some((p, view_dist)) = xform([x, height(x, z), z]) {
+                // R18: a sample hidden behind a road/bridge/vehicle breaks
+                // the run — the grid is the BOTTOM layer (VectorCraft law)
+                if occluded_by_scene(depth, dims, rect, p, view_dist) {
+                    prev = None;
+                    continue;
+                }
+                let fog = ((view_dist - fog_start) / (fog_end - fog_start)).clamp(0.0, 1.0);
                 let a = base as f32 * fade(x, z) * (1.0 - fog);
                 if a < 4.0 {
                     prev = None;
@@ -1797,7 +1868,19 @@ fn draw_grid_ruler(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect) {
 /// hovered cell (same metre ladder as the ground grid) fills with the
 /// accent at low alpha + a stronger stroke, projected onto the terrain /
 /// deck plane so it hugs the surface exactly like the grid lines do.
-fn draw_cursor_cell_highlight(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect, response: &egui::Response) {
+/// R18 VectorCraft layering law: the highlight DEPTH-TESTS against the
+/// scene like the grid lines — the cell is painted as a fine lattice of
+/// sub-quads and only the ones the scene doesn't hide are drawn, so a road
+/// crossing the cell is seen ON TOP of the highlight (the highlight never
+/// floats over roads).
+fn draw_cursor_cell_highlight(
+    app: &RoadkitApp,
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    response: &egui::Response,
+    depth: Option<&[f32]>,
+    dims: (usize, usize),
+) {
     let Some(pointer) = response.hover_pos() else {
         return;
     };
@@ -1821,31 +1904,91 @@ fn draw_cursor_cell_highlight(app: &RoadkitApp, ui: &egui::Ui, rect: egui::Rect,
     let sd = s as f64;
     let (cx, cz) = ((wx / sd).floor() * sd, (wz / sd).floor() * sd);
     let lift = 0.035f32;
-    let y = if plane_y > 0.0 { plane_y as f32 + lift } else {
-        scene.sampler.as_ref().map(|g| g.height(cx as f32, cz as f32)).unwrap_or(0.0) + lift
-    };
-    let corners = [
-        [cx as f32, cz as f32],
-        [(cx + sd) as f32, cz as f32],
-        [(cx + sd) as f32, (cz + sd) as f32],
-        [cx as f32, (cz + sd) as f32],
-    ];
-    let mut pts: Vec<egui::Pos2> = Vec::with_capacity(4);
-    for c in &corners {
-        match oc.xform(c[0] as f64, y as f64, c[1] as f64) {
-            Some((p, _)) => pts.push(p),
-            None => return, // a corner behind the camera — skip the highlight
+    let height_at = |x: f64, z: f64| -> f64 {
+        if plane_y > 0.0 {
+            plane_y + lift as f64
+        } else {
+            scene
+                .sampler
+                .as_ref()
+                .map(|g| g.height(x as f32, z as f32))
+                .unwrap_or(0.0) as f64
+                + lift as f64
         }
-    }
+    };
     let t = egui_kit::tokens(ui.ctx());
     let painter = ui.painter().with_clip_rect(painter_clip(ui, rect));
-    painter.add(egui::Shape::convex_polygon(
-        pts.clone(),
-        egui::Color32::from_rgba_unmultiplied(t.accent.r(), t.accent.g(), t.accent.b(), 46),
-        egui::Stroke::new(1.6, t.accent.gamma_multiply(0.9)),
-    ));
-    // small centre tick
-    let c = (pts[0].to_vec2() + pts[1].to_vec2() + pts[2].to_vec2() + pts[3].to_vec2()) * 0.25;
-    let c = egui::Pos2::new(c.x, c.y);
-    painter.circle_filled(c, 1.8, t.accent);
+    let fill = egui::Color32::from_rgba_unmultiplied(t.accent.r(), t.accent.g(), t.accent.b(), 46);
+    let edge_col = t.accent.gamma_multiply(0.9);
+
+    // ---- the fill: an N×N lattice of sub-quads, each depth-tested ----
+    const N: usize = 6;
+    let cell = |i: usize, j: usize| (cx + i as f64 * sd / N as f64, cz + j as f64 * sd / N as f64);
+    // project the full (N+1)² lattice once
+    let mut lat: Vec<Option<(egui::Pos2, f32)>> = Vec::with_capacity((N + 1) * (N + 1));
+    for j in 0..=N {
+        for i in 0..=N {
+            let (x, z) = cell(i, j);
+            lat.push(oc.xform(x, height_at(x, z), z));
+        }
+    }
+    let at = |i: usize, j: usize| lat[j * (N + 1) + i].clone();
+    let quad = |a: egui::Pos2, b: egui::Pos2, c: egui::Pos2, d: egui::Pos2| {
+        vec![a, b, c, d]
+    };
+    for j in 0..N {
+        for i in 0..N {
+            let (Some((p00, d00)), Some((p10, d10)), Some((p11, d11)), Some((p01, d01))) = (
+                at(i, j),
+                at(i + 1, j),
+                at(i + 1, j + 1),
+                at(i, j + 1),
+            ) else {
+                continue;
+            };
+            // test the sub-quad centre (mean distance of its corners)
+            let dc = (d00 + d10 + d11 + d01) * 0.25;
+            let centre = (p00.to_vec2() + p10.to_vec2() + p11.to_vec2() + p01.to_vec2()) * 0.25;
+            let centre = egui::Pos2::new(centre.x, centre.y);
+            if occluded_by_scene(depth, dims, rect, centre, dc) {
+                continue;
+            }
+            painter.add(egui::Shape::convex_polygon(
+                quad(p00, p10, p11, p01),
+                fill,
+                egui::Stroke::NONE,
+            ));
+        }
+    }
+    // ---- the outline: 4 edges as depth-tested runs (same as the grid) ----
+    for (i0, j0, i1, j1) in [(0usize, 0usize, N, 0), (N, 0, N, N), (N, N, 0, N), (0, N, 0, 0)] {
+        let steps = N * 4;
+        let mut prev: Option<egui::Pos2> = None;
+        for k in 0..=steps {
+            let f = k as f64 / steps as f64;
+            let (x, z) = (
+                cx + (i0 as f64 + (i1 - i0) as f64 * f) * sd / N as f64,
+                cz + (j0 as f64 + (j1 - j0) as f64 * f) * sd / N as f64,
+            );
+            if let Some((p, d)) = oc.xform(x, height_at(x, z), z) {
+                if occluded_by_scene(depth, dims, rect, p, d) {
+                    prev = None;
+                    continue;
+                }
+                if let Some(q) = prev {
+                    painter.line_segment([q, p], egui::Stroke::new(1.6, edge_col));
+                }
+                prev = Some(p);
+            } else {
+                prev = None;
+            }
+        }
+    }
+    // small centre tick (only when the scene doesn't hide it)
+    let (mx, mz) = (cx + sd * 0.5, cz + sd * 0.5);
+    if let Some((p, d)) = oc.xform(mx, height_at(mx, mz), mz) {
+        if !occluded_by_scene(depth, dims, rect, p, d) {
+            painter.circle_filled(p, 1.8, t.accent);
+        }
+    }
 }

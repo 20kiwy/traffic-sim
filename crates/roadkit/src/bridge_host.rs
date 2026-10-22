@@ -7,7 +7,7 @@
 //! GLB props along the curve with add_props()/stamp_prop().
 
 use gdscript::{GodotObject, Interpreter, Value, Vec3Val, CtorFn};
-use crate::{join_along, stamp, JoinParams, PropInstance};
+use crate::PropInstance;
 use roads::junction::{detect, weld_endpoints, Junction, JunctionKind, JunctionSettings};
 use roads::model::{Alignment, BridgeStyle, LaneDir, RoadCurve, RoadPoint, TrafficUpdate};
 use roads::terrain::TerrainState;
@@ -625,29 +625,21 @@ impl GodotObject for RoadCurveObj {
             }
             "stamp_prop" => {
                 // stamp_prop(asset, t, lateral)
+                // R18: ALL prop stamping is disabled (the user's standing
+                // request: "remove trees placement for now so to see only
+                // road and bridges — no stamping, remove all"). Scripts that
+                // stamp keep running; the stamps are simply not placed.
                 let asset = args
                     .first()
                     .and_then(Value::as_str)
                     .ok_or("stamp_prop(asset: String, t: float, lateral: float)")?
                     .to_string();
-                let t = args.get(1).and_then(Value::num).unwrap_or(0.0);
-                let lateral = args.get(2).and_then(Value::num).unwrap_or(0.0);
-                if self.curve.points.len() < 2 {
-                    return Err(format!(
-                        "curve '{}' needs at least 2 points before stamping props",
-                        self.curve.name
-                    ));
-                }
-                let Some(prop) = stamp(&self.curve, &asset, t, lateral, true, 1.0) else {
-                    return Err(format!("stamp_prop failed on curve '{}'", self.curve.name));
-                };
-                let pos = prop.pos;
+                let _ = args.get(1).and_then(Value::num).unwrap_or(0.0);
+                let _ = args.get(2).and_then(Value::num).unwrap_or(0.0);
                 let mut scene = self.scene.borrow_mut();
-                scene.props.push(prop);
-                scene.dirty = true;
                 scene.log(format!(
-                    "[props] stamped {asset} at t={t:.2} on '{}' → ({:.0}, {:.0})",
-                    self.curve.name, pos.x, pos.z
+                    "[props] stamping disabled (roads + bridges only) — skipped {asset} on '{}'",
+                    self.curve.name
                 ));
                 Ok(Value::Nil)
             }
@@ -720,37 +712,18 @@ impl RoadCurveObj {
         align: bool,
         random_yaw: bool,
     ) -> Result<Value, String> {
-        if self.curve.points.len() < 2 {
-            return Err(format!(
-                "curve '{}' needs at least 2 points before add_props()",
-                self.curve.name
-            ));
-        }
-        let seed = {
-            let mut scene = self.scene.borrow_mut();
-            scene.run_counter += 1;
-            scene.run_counter.wrapping_mul(2654435761).wrapping_add(1337)
-        };
-        let params = JoinParams {
-            spacing,
-            lateral,
-            alternate,
-            align,
-            scale: 1.0,
-            jitter: 0.12,
-            seed,
-            random_yaw,
-        };
-        let props = join_along(&self.curve, asset, &params);
-        let n = props.len();
+        // R18: ALL prop joining/stamping is disabled (the user's standing
+        // request: "remove trees placement for now so to see only road and
+        // bridges — no stamping, remove all"). The scripts keep running;
+        // nothing is placed. `align`/`random_yaw` stay in the signature so
+        // the script API is unchanged.
+        let _ = (spacing, lateral, alternate, align, random_yaw);
         let mut scene = self.scene.borrow_mut();
-        scene.props.extend(props);
-        scene.dirty = true;
         scene.log(format!(
-            "[props] joined {n} '{asset}' along '{}' (spacing {spacing:.0} m, lateral {lateral:.1} m)",
+            "[props] joining disabled (roads + bridges only) — skipped {asset} along '{}'",
             self.curve.name
         ));
-        Ok(Value::Int(n as i64))
+        Ok(Value::Int(0))
     }
 }
 

@@ -110,14 +110,17 @@ pub fn run() -> i32 {
 
     // 3. run each script on a fresh scene and check the pipeline
     //    (label, file, min curves, min props)
+    //    R18: ALL prop stamping is disabled (roads + bridges only) — every
+    //    script now yields 0 props; the min-props expectations stay in the
+    //    table as 0 so the pipeline shape is still asserted per script.
     let expectations: [(&str, &str, usize, usize); 7] = [
-        ("Demo Highway", "demo_highway.gd", 1, 8),
-        ("RA Showcase", "ra_showcase.gd", 4, 10),
-        ("Ring Loop", "ring_loop.gd", 1, 6),
-        ("Grid Network", "grid_network.gd", 5, 6),
+        ("Demo Highway", "demo_highway.gd", 1, 0),
+        ("RA Showcase", "ra_showcase.gd", 4, 0),
+        ("Ring Loop", "ring_loop.gd", 1, 0),
+        ("Grid Network", "grid_network.gd", 5, 0),
         ("Junction Test", "junction_test.gd", 5, 0),
-        ("Traffic Junction", "traffic_junction.gd", 2, 8),
-        ("BRT Mwendokasi", "brt_corridor.gd", 1, 4),
+        ("Traffic Junction", "traffic_junction.gd", 2, 0),
+        ("BRT Mwendokasi", "brt_corridor.gd", 1, 0),
     ];
 
     for (label, file, min_curves, min_props) in expectations {
@@ -154,7 +157,7 @@ pub fn run() -> i32 {
             ));
         }
         println!(
-            "run: {label} OK — {} curves, {} points, {} junctions, {} GLB props",
+            "run: {label} OK — {} curves, {} points, {} junctions, {} GLB props (stamping disabled R18)",
             sc.curves.len(),
             sc.curves.iter().map(|c| c.points.len()).sum::<usize>(),
             sc.junctions.len(),
@@ -243,34 +246,22 @@ pub fn run() -> i32 {
             }
         }
 
-        // traffic pack: the signalized junction must place lights + signs
+        // traffic pack: the signalized junction must still detect its
+        // junctions (the GLB light/sign props are no longer stamped — R18
+        // removed ALL prop stamping; the live signal heads render as the
+        // app's screen-space overlay from the SignalRegistry)
         if file == "traffic_junction.gd" {
-            let light_assets = sc
-                .props
-                .iter()
-                .filter(|p| p.asset.starts_with("trafficLight"))
-                .count();
-            let sign_assets = sc.props.iter().filter(|p| p.asset.starts_with("sign")).count();
-            if light_assets < 3 {
-                return fail(format!(
-                    "traffic_junction: expected >= 3 traffic lights, got {light_assets}"
-                ));
+            if sc.junctions.is_empty() {
+                return fail("traffic_junction: no junctions detected".into());
             }
-            if sign_assets < 4 {
-                return fail(format!("traffic_junction: expected >= 4 road signs, got {sign_assets}"));
-            }
-            println!("  traffic pack: {light_assets} signal heads + {sign_assets} signs placed");
+            println!(
+                "  traffic pack: {} junction(s) signalized via the SignalRegistry overlay (GLB heads not stamped)",
+                sc.junctions.len()
+            );
         }
-        // BRT corridor: cement median + median stations
+        // BRT corridor: cement median (the GLB station props are no longer
+        // stamped — the median/tactile ROAD GEOMETRY assertions stay)
         if file == "brt_corridor.gd" {
-            let stations = sc
-                .props
-                .iter()
-                .filter(|p| p.asset.starts_with("brt"))
-                .count();
-            if stations < 3 {
-                return fail(format!("brt_corridor: expected >= 3 BRT assets, got {stations}"));
-            }
             let has_brt_median = sc
                 .curves
                 .iter()
@@ -290,7 +281,7 @@ pub fn run() -> i32 {
                     "brt_corridor: expected tactile edge strips on the BRT median, got {tactile_parts}"
                 ));
             }
-            println!("  brt pack: {stations} station assets, cement strips {cement_parts}, tactile edges {tactile_parts}");
+            println!("  brt pack: cement strips {cement_parts}, tactile edges {tactile_parts} (GLB stations not stamped R18)");
         }
 
         // 4. build + render a frame (only for the demo, keeps output short)
