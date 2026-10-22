@@ -1,0 +1,20 @@
+[package]
+name = "maptools"
+version = "0.1.0"
+edition = "2021"
+description = "OSM -> Egregoria cartography import tools (separate library crate, nothing hardcoded in the app)"
+
+[dependencies]
+simulation = { path = "../simulation" }
+geom = { path = "../geom" }
+common = { path = "../common" }
+prototypes = { path = "../prototypes" }
+flat_spatial = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+roxmltree = "0.20"
+log = "0.4"
+
+# Full road properties + bridge engineering from the traffic-sim project.
+roads = { path = "../../../crates/roads" }
+bridge = { path = "../../../crates/bridge" }
