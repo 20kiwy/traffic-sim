@@ -40,6 +40,9 @@ pub struct State {
     /// Opaque carto mesh (ground/water/parks/bridge railings) — participates
     /// in the depth prepass, unlike the debug immediate renderer.
     carto_renderer: MeshBuilder<true>,
+    /// Layer-engine version the cached chunk meshes were built with — a bump
+    /// (any Layers panel edit) forces a chunk rebuild with the new gates.
+    built_vis_version: u64,
 
     all_audio: GameAudio,
 }
@@ -168,6 +171,7 @@ impl engine::framework::State for State {
             sim: Arc::new(RwLock::new(sim)),
             immediate_renderer: MeshBuilder::new(ctx.gfx.tess_material),
             carto_renderer: MeshBuilder::new(ctx.gfx.tess_material),
+            built_vis_version: 0,
         };
         me.sim.write().unwrap().map().dispatch_all();
         me
@@ -279,6 +283,15 @@ impl engine::framework::State for State {
 
         let time: GameTime = *self.sim.read().unwrap().read::<GameTime>();
 
+        // The Layers panel (maptools::layers — the carto tile-server catalog)
+        // gates every paint; a visibility edit bumps the version and forces
+        // the cached road/building chunks to rebuild with the new gates.
+        let vis_version = self.uiw.read::<maptools::layers::LayerVis>().version;
+        if vis_version != self.built_vis_version {
+            self.built_vis_version = vis_version;
+            sim.map().dispatch_all();
+        }
+
         self.map_renderer.render(
             &sim.map(),
             time.seconds,
@@ -290,6 +303,7 @@ impl engine::framework::State for State {
             &mut self.uiw.write::<ImmediateDraw>(),
             ctx,
             Some(&self.uiw.read::<maptools::CartoData>()),
+            &self.uiw.read::<maptools::layers::LayerVis>(),
         );
 
         self.instanced_renderer
@@ -436,7 +450,13 @@ impl State {
         self.uiw.read::<OrbitCamera>().cull_tess(&mut tess);
         {
             let carto = self.uiw.read::<maptools::CartoData>();
-            crate::rendering::cartography::draw_carto(&carto, &mut tess, Self::carto_drop(cam_dist));
+            let vis = self.uiw.read::<maptools::layers::LayerVis>();
+            crate::rendering::cartography::draw_carto(
+                &carto,
+                &vis,
+                &mut tess,
+                Self::carto_drop(cam_dist),
+            );
         }
         if let Some(x) = self.carto_renderer.build(ctx.gfx) {
             ctx.draw(x);

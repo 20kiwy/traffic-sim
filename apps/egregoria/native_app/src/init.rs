@@ -70,6 +70,8 @@ pub fn init() {
     register_resource_noserialize::<BuildingIcons>();
     register_resource_noserialize::<KeybindState>();
     register_resource_noserialize::<maptools::CartoData>();
+    // the carto layer engine (tile-server catalog + visibility overrides)
+    register_resource_noserialize::<maptools::layers::LayerVis>();
 }
 
 pub struct InitFunc {

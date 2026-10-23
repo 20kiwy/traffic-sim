@@ -7,6 +7,7 @@ struct FragmentOutput {
 
 const HAS_METALLIC_ROUGHNESS_TEXTURE: u32 = 1u;
 const HAS_NORMAL_MAP: u32 = 2u;
+const UNLIT: u32 = 4u;
 
 struct MaterialParams {
     flags: u32,
@@ -98,6 +99,16 @@ fn frag(@location(0) in_tint: vec4<f32>,
 
     let irradiance_diffuse: vec3<f32> = textureSample(t_diffuse_irradiance, s_diffuse_irradiance, normal).rgb;
     let c = mix(in_tint, vec4(1.0), metallic) * albedo;
+
+    // Unlit materials — the openstreetmap-carto paint (ground, roads,
+    // buildings). The vertex color is authored in linear space from the
+    // carto sRGB palette; writing it straight to the sRGB swapchain makes
+    // the 3D map match the carto tile server's tiles byte for byte. The
+    // PBR lights + tonemap would crush these hues (the "colors not well
+    // seen" report), so flat paint bypasses them entirely.
+    if ((u_mat.flags & UNLIT) != 0u) {
+        return FragmentOutput(vec4<f32>(c.rgb, c.a));
+    }
 
     let V_denorm: vec3<f32> = params.cam_pos.xyz - in_wpos;
     let dist: f32 = length(V_denorm);

@@ -8,18 +8,24 @@
 //! matches the flat map 100%. Nothing here is hardcoded in the app layer.
 
 use carto_style::{darken, Palette, Rgba};
-use geom::LinearColor;
+use geom::{from_srgb, LinearColor};
 
 /// The full openstreetmap-carto palette + style accessors.
 pub struct CartoStyle {
     palette: Palette,
 }
 
+/// carto `.mss` colors are sRGB bytes; the engine's shader colors are LINEAR
+/// (the swapchain is an sRGB format that re-encodes on write), so every
+/// palette color MUST go through the standard sRGB → linear transfer
+/// function — exactly what `From<Color> for LinearColor` does elsewhere.
+/// Skipping it painted the whole map washed-out (the "colors not well seen"
+/// report: `byte/255` written raw, then sRGB-encoded again on output).
 fn lin(c: Rgba) -> LinearColor {
     LinearColor {
-        r: c.r as f32 / 255.0,
-        g: c.g as f32 / 255.0,
-        b: c.b as f32 / 255.0,
+        r: from_srgb(c.r as f32 / 255.0),
+        g: from_srgb(c.g as f32 / 255.0),
+        b: from_srgb(c.b as f32 / 255.0),
         a: c.a as f32 / 255.0,
     }
 }
@@ -193,7 +199,7 @@ impl CartoStyle {
 
     /// Railway dark base (roads.mss z12+ two-tone: dark #707070 + white dash).
     pub fn rail(&self) -> LinearColor {
-        LinearColor::gray(0.44)
+        lin(Rgba::rgb(0x70, 0x70, 0x70))
     }
 }
 
@@ -246,6 +252,24 @@ mod tests {
     }
 
     #[test]
+    fn colors_are_linearized() {
+        // sRGB bytes must go through the transfer function — the shader
+        // colors are linear (sRGB swapchain re-encodes on write). Writing
+        // byte/255 raw washed the whole map out.
+        let s = CartoStyle::embedded();
+        let land = s.land();
+        // from_srgb(0xf2/255 = 0.949) ≈ 0.886 — strictly darker than the
+        // raw fraction
+        assert!(land.r < 0.949 && land.r > 0.85, "land r = {}", land.r);
+        // and round-trips back to the carto hex
+        let c: geom::Color = land.into();
+        assert_eq!(((c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8), (0xf2, 0xef, 0xe9));
+        let water = s.water();
+        let c: geom::Color = water.into();
+        assert_eq!(((c.r * 255.0).round() as u8, (c.g * 255.0).round() as u8, (c.b * 255.0).round() as u8), (0xaa, 0xd3, 0xdf));
+    }
+
+    #[test]
     fn road_mapping() {
         let s = CartoStyle::embedded();
         let primary = s.rgba("primary-fill");
@@ -256,3 +280,4 @@ mod tests {
         assert!(arrow.r < 1.0 && arrow.a == 1.0);
     }
 }
+

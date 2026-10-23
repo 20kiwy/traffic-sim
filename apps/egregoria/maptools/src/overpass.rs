@@ -50,7 +50,7 @@ pub fn load(xml: &str, map: &mut Map, carto_data: &mut CartoData) {
                 }
             }
         }
-        if refs.len() < 3 {
+        if refs.is_empty() {
             continue;
         }
         let tag = |k: &str| tags.iter().find(|(tk, _)| *tk == k).map(|(_, v)| *v);
@@ -63,6 +63,33 @@ pub fn load(xml: &str, map: &mut Map, carto_data: &mut CartoData) {
                 vec2(x as f32, y as f32)
             })
             .collect();
+        if pts.is_empty() {
+            continue;
+        }
+
+        // linear waterways (river/canal/stream/…) — the carto waterways
+        // layer paints them as @water-color strokes; riverbanks/polygon
+        // water fall through to the area branch below.
+        let waterway = tag("waterway").unwrap_or("");
+        if let Some(class) = waterway_line_class(waterway) {
+            if pts.len() >= 2 && tag("area").is_none() && tag("natural").is_none() {
+                let mut dedup = vec![pts[0]];
+                for p in &pts[1..] {
+                    if (*p - dedup[dedup.len() - 1]).mag2() > 1.0 {
+                        dedup.push(*p);
+                    }
+                }
+                if dedup.len() >= 2 {
+                    carto_data.grow_bounds(&dedup);
+                    carto_data.waterways.push((class, dedup));
+                }
+                continue;
+            }
+        }
+
+        if refs.len() < 3 {
+            continue;
+        }
         if pts.len() < 3 {
             continue;
         }
@@ -117,6 +144,17 @@ pub fn load(xml: &str, map: &mut Map, carto_data: &mut CartoData) {
                 carto_data.areas.push((var, pts));
             }
         }
+    }
+}
+
+/// `waterway=*` linear class → the carto waterways layer's paintable
+/// classes (landcover.mss / water.mss: river, canal, stream, ditch, drain).
+fn waterway_line_class(v: &str) -> Option<&'static str> {
+    match v {
+        "river" | "canal" => Some("river"),
+        "stream" => Some("stream"),
+        "ditch" | "drain" => Some("ditch"),
+        _ => None,
     }
 }
 

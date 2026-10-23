@@ -7,6 +7,7 @@ use engine::{
     MeshVertex, MetallicRoughness, SpriteBatch, SpriteBatchBuilder, Tesselator,
 };
 use geom::{minmax, vec2, vec3, Color, LinearColor, PolyLine3, Polygon, Radians, Vec2, Vec3};
+use maptools::layers::LayerVis;
 use maptools::{carto, CartoData};
 use prototypes::{FreightStationPrototype, GoodsCompanyPrototype, RenderAsset};
 use simulation::map::{
@@ -140,7 +141,8 @@ impl MapMeshHandler {
         }
 
         let crosswalk_tex = gfx.texture("assets/sprites/crosswalk.png", "crosswalk");
-        let crosswalk_mat = gfx.register_material(Material::new(
+        // unlit — flat carto paint, exact color parity with the tile server
+        let crosswalk_mat = gfx.register_material(Material::new_unlit(
             gfx,
             &crosswalk_tex,
             MetallicRoughness {
@@ -179,12 +181,13 @@ impl MapMeshHandler {
         options: MapRenderOptions,
         ctx: &mut FrameContext<'_>,
         carto: Option<&CartoData>,
+        vis: &LayerVis,
     ) {
         profiling::scope!("draw map mesh");
         for chunk in self.road_sub.take_updated_chunks() {
             profiling::scope!("build road chunk");
             let b = &mut self.builders;
-            b.map_mesh(map, chunk, carto);
+            b.map_mesh(map, chunk, carto, vis, options);
 
             let cached = self.cache.entry(chunk).or_default();
 
@@ -210,7 +213,7 @@ impl MapMeshHandler {
             profiling::scope!("build building chunk");
 
             let b = &mut self.builders;
-            b.buildings_mesh(map, chunk);
+            b.buildings_mesh(map, chunk, vis);
 
             let cached = self.cache.entry(chunk).or_default();
 
@@ -366,7 +369,10 @@ impl MapBuilders {
         }
     }
 
-    fn buildings_mesh(&mut self, map: &Map, chunk: SubscriberChunkID) {
+    fn buildings_mesh(&mut self, map: &Map, chunk: SubscriberChunkID, vis: &LayerVis) {
+        // carto "Buildings" layer — the panel toggle kills the whole layer
+        // (footprint extrusions + the @building-line roof outline).
+        let draw_buildings = vis.on("buildings");
         for v in self.buildsprites.values_mut() {
             v.clear();
         }
@@ -397,45 +403,58 @@ impl MapBuilders {
                 continue;
             }
             self.zone_mesh(building);
-            self.houses_mesh(building);
+            if draw_buildings {
+                self.houses_mesh(building);
 
-            // carto buildings.mss: the @building-line outline is what makes
-            // buildings read against the near-white land at map zooms.
-            {
-                const OUTLINE: f32 = 0.28;
-                let corners = building.obb.corners;
-                let z = building.height + 0.06;
-                self.houses_mesh.extend_with(None, |vertices, add_index| {
-                    let start = vertices.len() as u32;
-                    for w in corners.windows(2) {
-                        let a = vec3(w[0].x, w[0].y, z);
-                        let b = vec3(w[1].x, w[1].y, z);
-                        let dir = (b - a).xy().try_normalize().unwrap_or(Vec2::X);
-                        let perp = dir.perpendicular() * (OUTLINE * 0.5);
-                        let perp3 = vec3(perp.x, perp.y, 0.0);
-                        let mk = |p: Vec3| MeshVertex {
-                            position: p.into(),
-                            normal: Vec3::Z,
-                            uv: [0.0; 2],
-                            color: building_line_col,
-                            tangent: [0.0; 4],
-                        };
-                        vertices.push(mk(a - perp3));
-                        vertices.push(mk(a + perp3));
-                        vertices.push(mk(b + perp3));
-                        vertices.push(mk(b - perp3));
-                    }
-                    let n = corners.len();
-                    for i in 0..n {
-                        let s = start + (i as u32) * 4;
-                        add_index(s);
-                        add_index(s + 1);
-                        add_index(s + 2);
-                        add_index(s);
-                        add_index(s + 2);
-                        add_index(s + 3);
-                    }
-                });
+                // carto buildings.mss: the @building-line outline is what makes
+                // buildings read against the near-white land at map zooms.
+                // NOTE: add_index is relative to THIS extend (extend_with
+                // applies the builder's base offset itself) — the previous
+                // version added `vertices.len()` too, double-offsetting every
+                // outline past the mesh (index-out-of-bounds at build).
+                {
+                    const OUTLINE: f32 = 0.28;
+                    let corners = building.obb.corners;
+                    let z = building.height + 0.06;
+                    self.houses_mesh.extend_with(None, |vertices, add_index| {
+                        // close the ring explicitly — corners is an open
+                        // polygon, windows(2) alone drops the closing edge
+                        let mut ring = corners.to_vec();
+                        if let (Some(f), Some(l)) = (ring.first().copied(), ring.last().copied()) {
+                            if f != l {
+                                ring.push(f);
+                            }
+                        }
+                        for w in ring.windows(2) {
+                            let a = vec3(w[0].x, w[0].y, z);
+                            let b = vec3(w[1].x, w[1].y, z);
+                            let dir = (b - a).xy().try_normalize().unwrap_or(Vec2::X);
+                            let perp = dir.perpendicular() * (OUTLINE * 0.5);
+                            let perp3 = vec3(perp.x, perp.y, 0.0);
+                            let mk = |p: Vec3| MeshVertex {
+                                position: p.into(),
+                                normal: Vec3::Z,
+                                uv: [0.0; 2],
+                                color: building_line_col,
+                                tangent: [0.0; 4],
+                            };
+                            vertices.push(mk(a - perp3));
+                            vertices.push(mk(a + perp3));
+                            vertices.push(mk(b + perp3));
+                            vertices.push(mk(b - perp3));
+                        }
+                        let edges = (ring.len() - 1) as u32;
+                        for i in 0..edges {
+                            let s = i * 4; // local — base offset added by extend_with
+                            add_index(s);
+                            add_index(s + 1);
+                            add_index(s + 2);
+                            add_index(s);
+                            add_index(s + 2);
+                            add_index(s + 3);
+                        }
+                    });
+                }
             }
 
             if let Some(x) = self.buildsprites.get_mut(&building.kind) {
@@ -586,13 +605,26 @@ impl MapBuilders {
 
                 projected.simplify();
 
+                // OSM buildings can be degenerate (zero-height footprints);
+                // drop any triangle the earcut produced outside the
+                // (simplified) polygon instead of indexing past the mesh.
+                let n = projected.0.len();
                 earcut(&projected.0, &[], |mut a, b, mut c| {
                     if reverse {
                         std::mem::swap(&mut a, &mut c);
                     }
-                    add_index(a as u32);
-                    add_index(b as u32);
-                    add_index(c as u32);
+                    for i in [a, b, c] {
+                        if (i as usize) < n {
+                            add_index(i as u32);
+                        } else {
+                            log::warn!(
+                                "houses_mesh: earcut index {} >= {} (face {} pts) — dropped",
+                                i,
+                                n,
+                                face.len()
+                            );
+                        }
+                    }
                 })
             });
         }
@@ -626,11 +658,26 @@ impl MapBuilders {
         //}
     }
 
-    fn map_mesh(&mut self, map: &Map, chunk: SubscriberChunkID, carto: Option<&CartoData>) {
+    fn map_mesh(
+        &mut self,
+        map: &Map,
+        chunk: SubscriberChunkID,
+        carto: Option<&CartoData>,
+        vis: &LayerVis,
+        options: MapRenderOptions,
+    ) {
         self.arrow_builder.clear();
         self.crosswalk_builder.clear();
         self.mesh_map.clear();
         self.mesh_lots.clear();
+
+        // layer-engine gates — same ids the carto preview tile server's
+        // Layers panel edits (group hides children via LayerVis::on).
+        let on_casing = vis.on("road-casing");
+        let on_fill = vis.on("road-fill");
+        let on_rail = vis.on("rail");
+        let on_bridges = vis.on("bridges");
+        let on_arrows = vis.on("road-oneway") && options.show_arrows;
 
         let mut tess_map = self.mesh_map.mk_tess();
         let mut tess_lots = self.mesh_lots.mk_tess();
@@ -719,45 +766,53 @@ impl MapBuilders {
 
             let rs = road_style(road.id);
 
-            Self::arrows(&mut self.arrow_builder, road, lanes, rs.arrow);
+            if on_arrows {
+                Self::arrows(&mut self.arrow_builder, road, lanes, rs.arrow);
+            }
 
             let cut = road.interfaced_points();
             let first_dir = unwrap_cont!(cut.first_dir());
             let last_dir = unwrap_cont!(cut.last_dir());
 
-            road_pylons(&mut tess_map, env, road);
+            if on_bridges {
+                road_pylons(&mut tess_map, env, road);
+            }
 
-            tess_map.normal.z = -1.0;
-            tess_map.set_color(rs.casing);
-            tess_map.draw_polyline_full(
-                cut.iter().map(|x| x.up(-0.3)),
-                first_dir.xy(),
-                last_dir.xy(),
-                road.width,
-                0.0,
-            );
-            tess_map.normal.z = 1.0;
+            if on_casing {
+                tess_map.normal.z = -1.0;
+                tess_map.set_color(rs.casing);
+                tess_map.draw_polyline_full(
+                    cut.iter().map(|x| x.up(-0.3)),
+                    first_dir.xy(),
+                    last_dir.xy(),
+                    road.width,
+                    0.0,
+                );
+                tess_map.normal.z = 1.0;
 
-            // carto paint order (roads.mss): ALL casings first, then fills —
-            // the casing outline IS the road's readability (white fills live
-            // on the near-white @land-color): 1.2 m per side ≈ 1.4 px at
-            // fitted-tile zoom, chunky curb paint at street zoom.
-            tess_map.set_color(rs.casing);
-            tess_map.draw_polyline_full(
-                cut.iter().map(|x| x.up(-0.06)),
-                first_dir.xy(),
-                last_dir.xy(),
-                road.width + 2.4,
-                0.0,
-            );
-            tess_map.set_color(rs.fill);
-            tess_map.draw_polyline_full(
-                cut.iter().map(|x| x.up(-0.03)),
-                first_dir.xy(),
-                last_dir.xy(),
-                road.width,
-                0.0,
-            );
+                // carto paint order (roads.mss): ALL casings first, then fills —
+                // the casing outline IS the road's readability (white fills live
+                // on the near-white @land-color): 1.2 m per side ≈ 1.4 px at
+                // fitted-tile zoom, chunky curb paint at street zoom.
+                tess_map.set_color(rs.casing);
+                tess_map.draw_polyline_full(
+                    cut.iter().map(|x| x.up(-0.06)),
+                    first_dir.xy(),
+                    last_dir.xy(),
+                    road.width + 2.4,
+                    0.0,
+                );
+            }
+            if on_fill {
+                tess_map.set_color(rs.fill);
+                tess_map.draw_polyline_full(
+                    cut.iter().map(|x| x.up(-0.03)),
+                    first_dir.xy(),
+                    last_dir.xy(),
+                    road.width,
+                    0.0,
+                );
+            }
 
             let draw_off = |tess: &mut Tesselator, col: LinearColor, w, off| {
                 tess.set_color(col);
@@ -773,13 +828,16 @@ impl MapBuilders {
             let mut start = true;
             for l in road.lanes_iter().flat_map(|(l, _)| lanes.get(l)) {
                 if l.kind.is_rail() {
-                    let off = l.dist_from_bottom - road.width * 0.5 + LaneKind::Rail.width() * 0.5;
-                    draw_off(&mut tess_map, mid_col, LaneKind::Rail.width(), off);
-                    Self::draw_rail(&mut tess_map, cut, off, true);
+                    if on_rail {
+                        let off =
+                            l.dist_from_bottom - road.width * 0.5 + LaneKind::Rail.width() * 0.5;
+                        draw_off(&mut tess_map, mid_col, LaneKind::Rail.width(), off);
+                        Self::draw_rail(&mut tess_map, cut, off, true);
+                    }
                     start = true;
                     continue;
                 }
-                if start {
+                if on_casing && start {
                     draw_off(
                         &mut tess_map,
                         rs.casing,
@@ -788,22 +846,26 @@ impl MapBuilders {
                     );
                     start = false;
                 }
-                draw_off(
-                    &mut tess_map,
-                    match l.kind {
-                        LaneKind::Walking => rs.walk,
-                        LaneKind::Parking => rs.park,
-                        _ => rs.fill,
-                    },
-                    l.kind.width() - 0.25,
-                    l.dist_from_bottom - road.width * 0.5 + l.kind.width() * 0.5,
-                );
-                draw_off(
-                    &mut tess_map,
-                    rs.casing,
-                    0.25,
-                    l.dist_from_bottom - road.width * 0.5 + l.kind.width(),
-                );
+                if on_fill {
+                    draw_off(
+                        &mut tess_map,
+                        match l.kind {
+                            LaneKind::Walking => rs.walk,
+                            LaneKind::Parking => rs.park,
+                            _ => rs.fill,
+                        },
+                        l.kind.width() - 0.25,
+                        l.dist_from_bottom - road.width * 0.5 + l.kind.width() * 0.5,
+                    );
+                }
+                if on_casing {
+                    draw_off(
+                        &mut tess_map,
+                        rs.casing,
+                        0.25,
+                        l.dist_from_bottom - road.width * 0.5 + l.kind.width(),
+                    );
+                }
             }
         }
 
@@ -841,18 +903,27 @@ impl MapBuilders {
                         (st.road_casing("residential"), st.road_fill("residential"))
                     })
                     .unwrap_or((line_col, mid_col));
-                tess_map.set_color(dc);
-                tess_map.draw_circle(interpos, 5.5);
-
-                tess_map.set_color(df);
-                tess_map.draw_circle(interpos, 5.0);
+                if on_casing {
+                    tess_map.set_color(dc);
+                    tess_map.draw_circle(interpos, 5.5);
+                }
+                if on_fill {
+                    tess_map.set_color(df);
+                    tess_map.draw_circle(interpos, 5.0);
+                }
                 continue;
             }
 
-            Self::crosswalks(&mut self.crosswalk_builder, inter, lanes);
+            if on_fill {
+                Self::crosswalks(&mut self.crosswalk_builder, inter, lanes);
+            }
 
-            inter_pylon(&mut tess_map, env, inter, roads);
-            intersection_mesh(&mut tess_map, &js.fill, inter, roads);
+            if on_bridges {
+                inter_pylon(&mut tess_map, env, inter, roads);
+            }
+            if on_fill {
+                intersection_mesh(&mut tess_map, &js.fill, inter, roads);
+            }
 
             // Walking corners — carto @pedestrian-fill surface with the
             // junction casing border
@@ -860,7 +931,6 @@ impl MapBuilders {
                 .turns()
                 .filter(|turn| matches!(turn.kind, TurnKind::WalkingCorner))
             {
-                tess_map.set_color(js.casing);
                 let id = turn.id;
 
                 let w = lanes[id.src].kind.width();
@@ -868,27 +938,34 @@ impl MapBuilders {
                 let first_dir = -lanes[id.src].orientation_from(id.parent);
                 let last_dir = lanes[id.dst].orientation_from(id.parent);
 
-                p.clear();
-                p.extend_from_slice(turn.points.as_slice());
+                if on_casing {
+                    tess_map.set_color(js.casing);
+                    p.clear();
+                    p.extend_from_slice(turn.points.as_slice());
 
-                tess_map.draw_polyline_full(p.iter().copied(), first_dir, last_dir, 0.25, w * 0.5);
-                tess_map.draw_polyline_full(p.iter().copied(), first_dir, last_dir, 0.25, -w * 0.5);
+                    tess_map.draw_polyline_full(p.iter().copied(), first_dir, last_dir, 0.25, w * 0.5);
+                    tess_map.draw_polyline_full(p.iter().copied(), first_dir, last_dir, 0.25, -w * 0.5);
+                }
 
-                tess_map.set_color(js.walk);
+                if on_fill {
+                    tess_map.set_color(js.walk);
 
-                p.clear();
-                p.extend_from_slice(turn.points.as_slice());
+                    p.clear();
+                    p.extend_from_slice(turn.points.as_slice());
 
-                tess_map.draw_polyline_with_dir(&p, first_dir, last_dir, w - 0.25);
+                    tess_map.draw_polyline_with_dir(&p, first_dir, last_dir, w - 0.25);
+                }
             }
 
             // Rail turns
-            for turn in inter
-                .turns()
-                .filter(|turn| matches!(turn.kind, TurnKind::Rail))
-            {
-                ppoly.clear_extend(turn.points.as_slice());
-                Self::draw_rail(&mut tess_map, &ppoly, 0.0, false);
+            if on_rail {
+                for turn in inter
+                    .turns()
+                    .filter(|turn| matches!(turn.kind, TurnKind::Rail))
+                {
+                    ppoly.clear_extend(turn.points.as_slice());
+                    Self::draw_rail(&mut tess_map, &ppoly, 0.0, false);
+                }
             }
         }
 

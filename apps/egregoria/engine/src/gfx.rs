@@ -405,7 +405,7 @@ impl GfxContext {
 
         let mut materials = MaterialMap::default();
 
-        let tess_material = Material::new_raw(
+        let tess_material = Material::new_raw_impl(
             &device,
             &null_texture,
             MetallicRoughness {
@@ -415,6 +415,7 @@ impl GfxContext {
             },
             None,
             &null_texture,
+            true, // unlit — flat carto paint, exact color parity
         );
         let tess_material_id = materials.insert(tess_material);
 

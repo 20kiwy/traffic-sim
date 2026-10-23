@@ -15,6 +15,7 @@
 //! * Projection matches the egui app exactly (`GEO_ANCHOR`, equirectangular).
 
 pub mod carto;
+pub mod layers;
 pub mod overpass;
 pub mod schema;
 
@@ -88,6 +89,10 @@ pub struct CartoData {
     /// `@var` that paints them (resolved by [`carto::CartoStyle::area_var`]).
     pub areas: Vec<(&'static str, Vec<Vec2>)>,
     pub water: Vec<Vec<Vec2>>,
+    /// Linear waterways (`waterway=river,canal,stream,ditch,drain`) with the
+    /// OSM class — painted as `@water-color` strokes like the carto
+    /// waterways layer.
+    pub waterways: Vec<(&'static str, Vec<Vec2>)>,
     pub buildings: usize,
     pub roads: usize,
     pub bridges: Vec<BridgeInfo>,
@@ -424,12 +429,13 @@ pub fn load_osm_map(map: &mut Map, ways_json: &str, overpass_xml: Option<&str>) 
     map.osm_finish();
 
     log::info!(
-        "maptools: OSM import done in {:.1}s — {} roads, {} bridges, {} buildings, {} water, {} landcover areas",
+        "maptools: OSM import done in {:.1}s — {} roads, {} bridges, {} buildings, {} water, {} waterways, {} landcover areas",
         t.elapsed().as_secs_f32(),
         carto.roads,
         carto.bridges.len(),
         carto.buildings,
         carto.water.len(),
+        carto.waterways.len(),
         carto.areas.len()
     );
 

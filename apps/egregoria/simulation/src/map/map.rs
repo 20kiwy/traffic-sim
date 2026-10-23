@@ -114,7 +114,36 @@ impl Map {
 
     pub fn dispatch_all(&self) {
         self.subscribers.dispatch_clear();
-        let bounds = self.environment.bounds();
+        // The OSM carto builds carry no terrain (environment 0x0): the
+        // environment bounds are degenerate and the chunk loop below would
+        // dispatch nothing — the road meshes never built and the map showed
+        // ground + buildings only. Fall back to the actual map content
+        // bounds when the environment is empty.
+        let bounds = if self.environment.size() == (0, 0) {
+            let (mut mnx, mut mny) = (f32::MAX, f32::MAX);
+            let (mut mxx, mut mxy) = (f32::MIN, f32::MIN);
+            for (_, r) in self.roads.iter() {
+                let bb = r.points.bbox();
+                mnx = mnx.min(bb.ll.x);
+                mny = mny.min(bb.ll.y);
+                mxx = mxx.max(bb.ur.x);
+                mxy = mxy.max(bb.ur.y);
+            }
+            for (_, b) in self.buildings.iter() {
+                let c = b.obb.center();
+                mnx = mnx.min(c.x);
+                mny = mny.min(c.y);
+                mxx = mxx.max(c.x);
+                mxy = mxy.max(c.y);
+            }
+            if mnx <= mxx && mny <= mxy {
+                geom::AABB::new_ll_ur(geom::vec2(mnx, mny), geom::vec2(mxx, mxy))
+            } else {
+                self.environment.bounds()
+            }
+        } else {
+            self.environment.bounds()
+        };
         let ll = SubscriberChunkID::new(bounds.ll);
         let ur = SubscriberChunkID::new(bounds.ur);
         for x in ll.0..ur.0 {

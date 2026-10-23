@@ -1,6 +1,7 @@
 use engine::{Context, FrameContext, GfxContext, Water};
 use geom::{Camera, Circle, InfiniteFrustrum, Intersect3};
 use map_mesh::MapMeshHandler;
+use maptools::layers::LayerVis;
 use maptools::CartoData;
 use simulation::map::{Lane, LaneID, LaneKind, Map, ProjectFilter, ProjectKind, TrafficBehavior};
 use simulation::Simulation;
@@ -24,6 +25,7 @@ pub struct MapRenderer {
     pub lamps: LampsRender,
 }
 
+#[derive(Clone, Copy)]
 pub struct MapRenderOptions {
     pub show_arrows: bool,
     pub show_lots: bool,
@@ -62,20 +64,25 @@ impl MapRenderer {
         draw: &mut ImmediateDraw,
         ctx: &mut FrameContext<'_>,
         carto: Option<&CartoData>,
+        vis: &LayerVis,
     ) {
         profiling::scope!("render map renderer");
         self.terrain.draw(cam, ctx);
 
-        self.trees.draw(map, cam, ctx);
+        // carto layer engine — "Trees" row (natural=tree)
+        if vis.on("trees") {
+            self.trees.draw(map, cam, ctx);
+        }
 
-        self.meshb.latest_mesh(map, options, ctx, carto);
+        self.meshb.latest_mesh(map, options, ctx, carto, vis);
 
-        Self::signals_render(map, time, cam, &ctx.gfx.frustrum, draw);
+        Self::signals_render(map, time, cam, &ctx.gfx.frustrum, draw, vis);
 
         // The water plane samples the depth texture inside the main pass.
         // GLES cannot combine a (write) depth attachment with sampling the
         // same texture in one pass, so skip it on the GL backend.
-        if std::env::var("WGPU_BACKEND").as_deref() != Ok("gl") {
+        // carto layer engine — "Ocean" row (the flat sea plane).
+        if vis.on("ocean") && std::env::var("WGPU_BACKEND").as_deref() != Ok("gl") {
             ctx.draw(self.water.clone());
         }
     }
@@ -132,8 +139,14 @@ impl MapRenderer {
         cam: &Camera,
         frustrum: &InfiniteFrustrum,
         draw: &mut ImmediateDraw,
+        vis: &LayerVis,
     ) {
         let pos = cam.pos;
+
+        // carto layer engine — "Street lamps" row (highway=street_lamp):
+        // the flat carto map has no lamp posts, so they default off and the
+        // panel turns them on.
+        let lamps_on = vis.on("lamps");
 
         for kind in map
             .spatial_map()
@@ -157,8 +170,10 @@ impl MapRenderer {
                     0.0
                 };
                 let w = r.width * 0.5 - offset;
-                for (point, dir) in r.interfaced_points().equipoints_dir(45.0, true) {
-                    draw.mesh("streetlamp.glb", point - dir.perp_up() * w, dir.perp_up());
+                if lamps_on {
+                    for (point, dir) in r.interfaced_points().equipoints_dir(45.0, true) {
+                        draw.mesh("streetlamp.glb", point - dir.perp_up() * w, dir.perp_up());
+                    }
                 }
             }
 

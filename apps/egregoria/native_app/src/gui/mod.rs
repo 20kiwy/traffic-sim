@@ -29,7 +29,7 @@ impl Default for GuiState {
     fn default() -> Self {
         Self {
             debug_window: false,
-            windows: Default::default(),
+            windows: crate::gui::windows::GUIWindows::new(),
             last_save: Instant::now(),
             depause_warp: 1,
             hidden: false,

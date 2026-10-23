@@ -20,6 +20,10 @@ pub struct Material {
     pub mat_params: wgpu::Buffer,
     pub metallic_roughness_map: Option<Arc<Texture>>,
     pub transparent: bool,
+    /// Unlit materials (the openstreetmap-carto paint) skip the PBR lights
+    /// and the tonemap — the vertex/tint color IS the final color, so the
+    /// 3D map matches the carto tile server's output byte for byte.
+    pub unlit: bool,
 }
 
 pub struct MetallicRoughness {
@@ -30,6 +34,7 @@ pub struct MetallicRoughness {
 
 const HAS_METALLIC_ROUGHNESS_MAP: u32 = 1 << 0;
 const HAS_NORMAL_MAP: u32 = 1 << 1;
+const UNLIT_FLAG: u32 = 1 << 2;
 
 #[derive(Copy, Clone)]
 #[repr(C)]
@@ -57,6 +62,23 @@ impl Material {
         )
     }
 
+    /// Unlit material — flat cartographic paint, exact color output.
+    pub fn new_unlit(
+        gfx: &GfxContext,
+        albedo: &Texture,
+        metallic_roughness: MetallicRoughness,
+        normal_map: Option<&Texture>,
+    ) -> Self {
+        Self::new_raw_impl(
+            &gfx.device,
+            albedo,
+            metallic_roughness,
+            normal_map,
+            &gfx.null_texture,
+            true,
+        )
+    }
+
     pub fn new_raw(
         device: &Device,
         albedo: &Texture,
@@ -64,12 +86,26 @@ impl Material {
         normal_map: Option<&Texture>,
         bogus_tex: &Texture,
     ) -> Self {
+        Self::new_raw_impl(device, albedo, metallic_roughness, normal_map, bogus_tex, false)
+    }
+
+    pub(crate) fn new_raw_impl(
+        device: &Device,
+        albedo: &Texture,
+        metallic_roughness: MetallicRoughness,
+        normal_map: Option<&Texture>,
+        bogus_tex: &Texture,
+        unlit: bool,
+    ) -> Self {
         let mut flags = 0;
         if metallic_roughness.tex.is_some() {
             flags |= HAS_METALLIC_ROUGHNESS_MAP;
         }
         if normal_map.is_some() {
             flags |= HAS_NORMAL_MAP;
+        }
+        if unlit {
+            flags |= UNLIT_FLAG;
         }
 
         let mat_params = device.create_buffer_init(&BufferInitDescriptor {
@@ -157,6 +193,7 @@ impl Material {
             mat_params,
             metallic_roughness_map: metallic_roughness.tex,
             transparent: false,
+            unlit,
         }
     }
 

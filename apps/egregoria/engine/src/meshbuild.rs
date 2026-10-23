@@ -88,6 +88,15 @@ impl<const PERSISTENT: bool> MeshBuilder<PERSISTENT> {
         self.lods.push(MeshLod::default());
     }
 
+    /// (vertex count, index count, max index) — debug/diagnostics helper.
+    pub fn debug_stats(&self) -> (usize, usize, IndexType) {
+        (
+            self.vertices.len(),
+            self.indices.len(),
+            self.indices.iter().copied().max().unwrap_or(0),
+        )
+    }
+
     pub fn extend(
         &mut self,
         mat: Option<MaterialID>,
@@ -218,9 +227,21 @@ impl<const PERSISTENT: bool> MeshBuilder<PERSISTENT> {
                 continue;
             }
             let mut aabb3 = AABB3::zero();
-            for (_, range) in &lod.primitives {
+            for (mat, range) in &lod.primitives {
                 for &idx in &self.indices[range.start as usize..range.end as usize] {
-                    aabb3 = aabb3.union_vec(self.vertices[idx as usize].position.into());
+                    let i = idx as usize;
+                    if i >= self.vertices.len() {
+                        log::error!(
+                            "meshbuild: index {} >= {} vertices (range {}..{} mat {:?}) — clamping",
+                            i,
+                            self.vertices.len(),
+                            range.start,
+                            range.end,
+                            mat
+                        );
+                        continue;
+                    }
+                    aabb3 = aabb3.union_vec(self.vertices[i].position.into());
                 }
             }
             lod.aabb3 = aabb3;

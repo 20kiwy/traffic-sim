@@ -44,6 +44,10 @@ pub fn osmdata(uiworld: &UiWorld, _sim: &Simulation, opened: &mut bool) {
             );
             textc(
                 on_primary_container(),
+                format!("Waterways: {}", carto.waterways.len()),
+            );
+            textc(
+                on_primary_container(),
                 format!("Landcover areas: {}", carto.areas.len()),
             );
 
