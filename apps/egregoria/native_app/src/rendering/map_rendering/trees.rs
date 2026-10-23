@@ -12,6 +12,10 @@ pub struct TreesRender {
     tree_builder: InstancedMeshBuilder<false>,
     trees_cache: FastMap<SubscriberChunkID, InstancedMesh>,
     tree_sub: MapSubscriber,
+    /// False on the OSM carto build (no terrain chunks): the procedural
+    /// environment trees are a terrain feature and the user asked for a
+    /// roads-and-bridges-only cartography — no trees, no stamping.
+    enabled: bool,
 }
 
 impl TreesRender {
@@ -19,10 +23,12 @@ impl TreesRender {
         let mesh = gfx.mesh("pine.glb".as_ref()).expect("could not load pine");
 
         let tree_sub = map.subscribe(UpdateType::Terrain);
+        let (w, h) = map.environment.size();
         Self {
             tree_builder: InstancedMeshBuilder::new_ref(&mesh),
             trees_cache: FastMap::default(),
             tree_sub,
+            enabled: w != 0 && h != 0,
         }
     }
 
@@ -53,6 +59,10 @@ impl TreesRender {
     }
 
     pub fn draw(&mut self, map: &Map, cam: &Camera, ctx: &mut FrameContext<'_>) {
+        if !self.enabled {
+            self.trees_cache.clear();
+            return;
+        }
         profiling::scope!("draw trees");
         self.build(map, ctx);
 

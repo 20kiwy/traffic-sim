@@ -11,6 +11,8 @@ members = [
     "goryak",
     "headless",
     "maptools",
+    "carto-math",
+    "carto-style",
     "native_app",
     "networking",
     "prototypes",

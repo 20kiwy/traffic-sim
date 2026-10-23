@@ -114,15 +114,23 @@ impl InstancedRender {
             if wait == 0 {
                 continue;
             }
+            // Flash briefly when the reroute starts, then fade — a
+            // permanently-lost agent must not keep a red marker over the
+            // map forever (the pink-dot spam on OSM imports with
+            // disconnected islands).
+            let fade = (1.0 - wait as f32 / 90.0).max(0.0);
+            if fade <= 0.01 {
+                continue;
+            }
 
-            let r = wait as f32 / 200.0;
+            let r = (wait as f32 / 90.0).min(1.0);
             let off = 1.0 - r;
 
             let s = 7.0;
             self.path_not_found.push(
                 trans.pos + off * 3.0 * V3::Y + 3.0 * V3::Z,
                 Vec3::X,
-                LinearColor::RED.a(r),
+                LinearColor::RED.a(fade),
                 (s, s),
             );
         }

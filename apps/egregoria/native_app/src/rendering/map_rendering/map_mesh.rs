@@ -7,6 +7,7 @@ use engine::{
     MeshVertex, MetallicRoughness, SpriteBatch, SpriteBatchBuilder, Tesselator,
 };
 use geom::{minmax, vec2, vec3, Color, LinearColor, PolyLine3, Polygon, Radians, Vec2, Vec3};
+use maptools::{carto, CartoData};
 use prototypes::{FreightStationPrototype, GoodsCompanyPrototype, RenderAsset};
 use simulation::map::{
     Building, BuildingKind, CanonicalPosition, Environment, Intersection, LaneKind, Lanes, LotKind,
@@ -149,22 +150,16 @@ impl MapMeshHandler {
             },
             None,
         ));
-        let houses_mat = gfx.register_material(Material::new(
-            gfx,
-            &gfx.palette(),
-            MetallicRoughness {
-                metallic: 0.0,
-                roughness: 1.0,
-                tex: None,
-            },
-            None,
-        ));
+        // NOTE: the houses mesh used to sample the palette sprite at uv [0,0]
+        // (a PINK texel) — every building rendered as a pink dot. The tess
+        // material shows the per-vertex carto colors (openstreetmap-carto
+        // @building-fill / @building-line from colors.lua) instead.
         let builders = MapBuilders {
             arrow_builder,
             buildsprites,
             crosswalk_builder: MeshBuilder::new(crosswalk_mat),
             mesh_map: MeshBuilder::new(gfx.tess_material),
-            houses_mesh: MeshBuilder::new(houses_mat),
+            houses_mesh: MeshBuilder::new(gfx.tess_material),
             buildmeshes,
             zonemeshes,
             mesh_lots: MeshBuilder::new(gfx.tess_material),
@@ -183,12 +178,13 @@ impl MapMeshHandler {
         map: &Map,
         options: MapRenderOptions,
         ctx: &mut FrameContext<'_>,
+        carto: Option<&CartoData>,
     ) {
         profiling::scope!("draw map mesh");
         for chunk in self.road_sub.take_updated_chunks() {
             profiling::scope!("build road chunk");
             let b = &mut self.builders;
-            b.map_mesh(map, chunk);
+            b.map_mesh(map, chunk, carto);
 
             let cached = self.cache.entry(chunk).or_default();
 
@@ -278,7 +274,12 @@ impl MapMeshHandler {
 }
 
 impl MapBuilders {
-    fn arrows(arrow_builder: &mut SpriteBatchBuilder<false>, road: &Road, lanes: &Lanes) {
+    fn arrows(
+        arrow_builder: &mut SpriteBatchBuilder<false>,
+        road: &Road,
+        lanes: &Lanes,
+        arrow_col: LinearColor,
+    ) {
         let has_forward = road
             .outgoing_lanes_from(road.src)
             .iter()
@@ -299,11 +300,6 @@ impl MapBuilders {
 
         let n_arrows = ((road.length() / 50.0) as i32).max(1);
 
-        let fade =
-            (road.length() - 5.0 - road.interface_from(road.src) - road.interface_from(road.dst))
-                .mul(0.2)
-                .clamp(0.0, 1.0);
-
         for (id, _) in road.lanes_iter().filter(|(_, kind)| kind.needs_arrows()) {
             let lane = &lanes[id];
             let l = lane.points.length();
@@ -315,7 +311,8 @@ impl MapBuilders {
                 arrow_builder.push(
                     mid.up(0.03),
                     dir,
-                    LinearColor::gray(0.3 + fade * 0.1),
+                    // carto roads.mss ::directions — darken(casing, 10-40%)
+                    arrow_col,
                     (4.0, 4.0),
                 );
             }
@@ -383,6 +380,7 @@ impl MapBuilders {
         self.houses_mesh.clear();
 
         let buildings = &map.buildings();
+        let building_line_col: [f32; 4] = maptools::carto::global().building_line().into();
         for building in map
             .spatial_map()
             .query(chunk.bbox(), ProjectFilter::BUILDING)
@@ -400,6 +398,45 @@ impl MapBuilders {
             }
             self.zone_mesh(building);
             self.houses_mesh(building);
+
+            // carto buildings.mss: the @building-line outline is what makes
+            // buildings read against the near-white land at map zooms.
+            {
+                const OUTLINE: f32 = 0.28;
+                let corners = building.obb.corners;
+                let z = building.height + 0.06;
+                self.houses_mesh.extend_with(None, |vertices, add_index| {
+                    let start = vertices.len() as u32;
+                    for w in corners.windows(2) {
+                        let a = vec3(w[0].x, w[0].y, z);
+                        let b = vec3(w[1].x, w[1].y, z);
+                        let dir = (b - a).xy().try_normalize().unwrap_or(Vec2::X);
+                        let perp = dir.perpendicular() * (OUTLINE * 0.5);
+                        let perp3 = vec3(perp.x, perp.y, 0.0);
+                        let mk = |p: Vec3| MeshVertex {
+                            position: p.into(),
+                            normal: Vec3::Z,
+                            uv: [0.0; 2],
+                            color: building_line_col,
+                            tangent: [0.0; 4],
+                        };
+                        vertices.push(mk(a - perp3));
+                        vertices.push(mk(a + perp3));
+                        vertices.push(mk(b + perp3));
+                        vertices.push(mk(b - perp3));
+                    }
+                    let n = corners.len();
+                    for i in 0..n {
+                        let s = start + (i as u32) * 4;
+                        add_index(s);
+                        add_index(s + 1);
+                        add_index(s + 2);
+                        add_index(s);
+                        add_index(s + 2);
+                        add_index(s + 3);
+                    }
+                });
+            }
 
             if let Some(x) = self.buildsprites.get_mut(&building.kind) {
                 let axis = building.obb.axis();
@@ -562,7 +599,7 @@ impl MapBuilders {
     }
 
     fn draw_rail(tess: &mut Tesselator, cut: &PolyLine3, off: f32, _limits: bool) {
-        tess.set_color(Color::gray(0.5));
+        tess.set_color(Color::gray(0.44)); // carto rail dark tone
         tess.draw_polyline_full(
             cut.as_slice().iter().map(|v| vec3(v.x, v.y, v.z + 0.02)),
             unwrap_ret!(cut.first_dir()).xy(),
@@ -589,7 +626,7 @@ impl MapBuilders {
         //}
     }
 
-    fn map_mesh(&mut self, map: &Map, chunk: SubscriberChunkID) {
+    fn map_mesh(&mut self, map: &Map, chunk: SubscriberChunkID, carto: Option<&CartoData>) {
         self.arrow_builder.clear();
         self.crosswalk_builder.clear();
         self.mesh_map.clear();
@@ -602,6 +639,53 @@ impl MapBuilders {
         let mid_col: LinearColor = simulation::colors().road_mid_col.into();
         let hig_col: LinearColor = simulation::colors().road_hig_col.into();
         let line_col: LinearColor = simulation::colors().road_line_col.into();
+
+        // openstreetmap-carto road styling — resolved from the real palette
+        // through the road's OSM class (maptools RoadProps).
+        struct RoadStyle {
+            fill: LinearColor,
+            casing: LinearColor,
+            walk: LinearColor,
+            park: LinearColor,
+            arrow: LinearColor,
+        }
+        let fallback = RoadStyle {
+            fill: mid_col,
+            casing: low_col,
+            walk: hig_col,
+            park: low_col,
+            arrow: low_col,
+        };
+        let style = carto::global();
+        let road_style = |rid: simulation::map::RoadID| -> RoadStyle {
+            let Some(p) = carto.and_then(|c| c.props.get(&rid)) else {
+                return RoadStyle {
+                    fill: fallback.fill,
+                    casing: fallback.casing,
+                    walk: fallback.walk,
+                    park: fallback.park,
+                    arrow: fallback.arrow,
+                };
+            };
+            let fill = style.road_fill(&p.highway);
+            RoadStyle {
+                casing: if p.bridge.is_some() {
+                    // carto roads.mss @bridge-casing: black deck outline
+                    style.bridge_casing()
+                } else {
+                    style.road_casing(&p.highway)
+                },
+                fill,
+                walk: style.pedestrian_fill(),
+                park: LinearColor {
+                    r: fill.r * 0.85,
+                    g: fill.g * 0.85,
+                    b: fill.b * 0.85,
+                    a: 1.0,
+                },
+                arrow: style.oneway_arrow(&p.highway),
+            }
+        };
 
         let objs = map.spatial_map().query(
             chunk.bbox(),
@@ -633,7 +717,9 @@ impl MapBuilders {
         for road in chunk_roads {
             let road = &roads[road];
 
-            Self::arrows(&mut self.arrow_builder, road, lanes);
+            let rs = road_style(road.id);
+
+            Self::arrows(&mut self.arrow_builder, road, lanes, rs.arrow);
 
             let cut = road.interfaced_points();
             let first_dir = unwrap_cont!(cut.first_dir());
@@ -642,6 +728,7 @@ impl MapBuilders {
             road_pylons(&mut tess_map, env, road);
 
             tess_map.normal.z = -1.0;
+            tess_map.set_color(rs.casing);
             tess_map.draw_polyline_full(
                 cut.iter().map(|x| x.up(-0.3)),
                 first_dir.xy(),
@@ -650,6 +737,27 @@ impl MapBuilders {
                 0.0,
             );
             tess_map.normal.z = 1.0;
+
+            // carto paint order (roads.mss): ALL casings first, then fills —
+            // the casing outline IS the road's readability (white fills live
+            // on the near-white @land-color): 1.2 m per side ≈ 1.4 px at
+            // fitted-tile zoom, chunky curb paint at street zoom.
+            tess_map.set_color(rs.casing);
+            tess_map.draw_polyline_full(
+                cut.iter().map(|x| x.up(-0.06)),
+                first_dir.xy(),
+                last_dir.xy(),
+                road.width + 2.4,
+                0.0,
+            );
+            tess_map.set_color(rs.fill);
+            tess_map.draw_polyline_full(
+                cut.iter().map(|x| x.up(-0.03)),
+                first_dir.xy(),
+                last_dir.xy(),
+                road.width,
+                0.0,
+            );
 
             let draw_off = |tess: &mut Tesselator, col: LinearColor, w, off| {
                 tess.set_color(col);
@@ -674,7 +782,7 @@ impl MapBuilders {
                 if start {
                     draw_off(
                         &mut tess_map,
-                        line_col,
+                        rs.casing,
                         0.25,
                         l.dist_from_bottom - road.width * 0.5,
                     );
@@ -683,16 +791,16 @@ impl MapBuilders {
                 draw_off(
                     &mut tess_map,
                     match l.kind {
-                        LaneKind::Walking => hig_col,
-                        LaneKind::Parking => low_col,
-                        _ => mid_col,
+                        LaneKind::Walking => rs.walk,
+                        LaneKind::Parking => rs.park,
+                        _ => rs.fill,
                     },
                     l.kind.width() - 0.25,
                     l.dist_from_bottom - road.width * 0.5 + l.kind.width() * 0.5,
                 );
                 draw_off(
                     &mut tess_map,
-                    line_col,
+                    rs.casing,
                     0.25,
                     l.dist_from_bottom - road.width * 0.5 + l.kind.width(),
                 );
@@ -707,11 +815,36 @@ impl MapBuilders {
 
             let interpos = inter.pos.up(ROAD_Z_OFFSET);
 
+            // Junction surface = the fill of the most major connected road
+            // (carto paint order — major classes win); casing matches.
+            let js = inter
+                .roads
+                .iter()
+                .filter_map(|&r| {
+                    let p = carto.and_then(|c| c.props.get(&roads[r].id))?;
+                    Some((carto::road_class_rank(&p.highway), road_style(roads[r].id)))
+                })
+                .min_by_key(|(rank, _)| *rank)
+                .map(|(_, s)| s)
+                .unwrap_or(RoadStyle {
+                    fill: hig_col,
+                    casing: low_col,
+                    walk: hig_col,
+                    park: low_col,
+                    arrow: low_col,
+                });
+
             if inter.roads.is_empty() {
-                tess_map.set_color(line_col);
+                let (dc, df) = carto
+                    .map(|_| {
+                        let st = carto::global();
+                        (st.road_casing("residential"), st.road_fill("residential"))
+                    })
+                    .unwrap_or((line_col, mid_col));
+                tess_map.set_color(dc);
                 tess_map.draw_circle(interpos, 5.5);
 
-                tess_map.set_color(mid_col);
+                tess_map.set_color(df);
                 tess_map.draw_circle(interpos, 5.0);
                 continue;
             }
@@ -719,14 +852,15 @@ impl MapBuilders {
             Self::crosswalks(&mut self.crosswalk_builder, inter, lanes);
 
             inter_pylon(&mut tess_map, env, inter, roads);
-            intersection_mesh(&mut tess_map, &hig_col, inter, roads);
+            intersection_mesh(&mut tess_map, &js.fill, inter, roads);
 
-            // Walking corners
+            // Walking corners — carto @pedestrian-fill surface with the
+            // junction casing border
             for turn in inter
                 .turns()
                 .filter(|turn| matches!(turn.kind, TurnKind::WalkingCorner))
             {
-                tess_map.set_color(line_col);
+                tess_map.set_color(js.casing);
                 let id = turn.id;
 
                 let w = lanes[id.src].kind.width();
@@ -740,7 +874,7 @@ impl MapBuilders {
                 tess_map.draw_polyline_full(p.iter().copied(), first_dir, last_dir, 0.25, w * 0.5);
                 tess_map.draw_polyline_full(p.iter().copied(), first_dir, last_dir, 0.25, -w * 0.5);
 
-                tess_map.set_color(hig_col);
+                tess_map.set_color(js.walk);
 
                 p.clear();
                 p.extend_from_slice(turn.points.as_slice());
@@ -978,7 +1112,7 @@ fn intersection_mesh(
 
     polygon.simplify();
 
-    let col = LinearColor::from(simulation::colors().road_mid_col).into();
+    let col: [f32; 4] = (*center_col).into();
     tess.extend_with(move |vertices, add_idx| {
         vertices.extend(polygon.iter().map(|pos| MeshVertex {
             position: pos.z(interpos.z - 0.001).into(),

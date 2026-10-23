@@ -42,7 +42,10 @@ pub fn osmdata(uiworld: &UiWorld, _sim: &Simulation, opened: &mut bool) {
                 on_primary_container(),
                 format!("Water areas: {}", carto.water.len()),
             );
-            textc(on_primary_container(), format!("Parks: {}", carto.parks.len()));
+            textc(
+                on_primary_container(),
+                format!("Landcover areas: {}", carto.areas.len()),
+            );
 
             if !carto.bridges.is_empty() {
                 textc(

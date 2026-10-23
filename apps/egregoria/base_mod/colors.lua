@@ -4,25 +4,29 @@ data:extend {
     name = "colors",
     label = "Colors",
 
+    -- openstreetmap-carto @sand
     sand_col = {
-        r = 0.5411765,
-        g = 0.49019608,
-        b = 0.3019608,
+        r = 0.9607843,
+        g = 0.9137255,
+        b = 0.7764706,
     },
+    -- openstreetmap-carto @water-color
     sea_col = {
-        r = 0.20896202,
-        g = 0.39679408,
-        b = 0.47983873,
+        r = 0.6666667,
+        g = 0.827451,
+        b = 0.8745098,
     },
+    -- openstreetmap-carto @building-line (darken(@building-fill,15%))
     roof_col = {
-        r = 0.2627451,
-        g = 0.21314174,
-        b = 0.12673587,
+        r = 0.7372549,
+        g = 0.7019608,
+        b = 0.6666667,
     },
+    -- openstreetmap-carto @building-fill
     house_col = {
-        r = 1.0,
-        g = 1.0,
-        b = 1.0,
+        r = 0.8509804,
+        g = 0.8156863,
+        b = 0.7882353,
     },
     gui_success = {
         r = 0.3,
@@ -70,14 +74,16 @@ data:extend {
         g = 0.4879001,
         b = 0.48790324,
     },
+    -- openstreetmap-carto @residential-line
     lot_unassigned_col = {
-        r = 0.20392157,
-        g = 0.4509804,
-        b = 0.17254902,
+        r = 0.7254902,
+        g = 0.7254902,
+        b = 0.7254902,
     },
+    -- openstreetmap-carto @residential
     lot_residential_col = {
-        r = 0.2,
-        g = 0.6,
-        b = 0.25,
+        r = 0.8784314,
+        g = 0.8745098,
+        b = 0.8745098,
     }
 }

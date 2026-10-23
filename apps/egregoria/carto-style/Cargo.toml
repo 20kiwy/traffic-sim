@@ -1,0 +1,8 @@
+[package]
+name = "carto-style"
+version = "0.2.0"
+edition = "2021"
+description = "openstreetmap-carto style engine: MSS parser, palette registry, symbols, fonts (vendored 1:1 from 20kiwy/map-launcher)"
+
+[dependencies]
+include_dir = "0.7"

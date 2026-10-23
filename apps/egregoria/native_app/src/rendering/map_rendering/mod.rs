@@ -1,6 +1,7 @@
 use engine::{Context, FrameContext, GfxContext, Water};
 use geom::{Camera, Circle, InfiniteFrustrum, Intersect3};
 use map_mesh::MapMeshHandler;
+use maptools::CartoData;
 use simulation::map::{Lane, LaneID, LaneKind, Map, ProjectFilter, ProjectKind, TrafficBehavior};
 use simulation::Simulation;
 use terrain::TerrainRender;
@@ -43,7 +44,12 @@ impl MapRenderer {
     pub fn update(&mut self, sim: &Simulation, ctx: &mut Context) {
         profiling::scope!("update map renderer");
         let map = sim.map();
-        self.lamps.update(&map, ctx);
+        // The OSM carto build has no terrain (0x0 heightmap): no street
+        // lamps — their sodium light pools would paint pink rings over the
+        // whole cartography.
+        if map.environment.size().0 != 0 {
+            self.lamps.update(&map, ctx);
+        }
         self.terrain.update(ctx, &map);
     }
 
@@ -55,13 +61,14 @@ impl MapRenderer {
         options: MapRenderOptions,
         draw: &mut ImmediateDraw,
         ctx: &mut FrameContext<'_>,
+        carto: Option<&CartoData>,
     ) {
         profiling::scope!("render map renderer");
         self.terrain.draw(cam, ctx);
 
         self.trees.draw(map, cam, ctx);
 
-        self.meshb.latest_mesh(map, options, ctx);
+        self.meshb.latest_mesh(map, options, ctx, carto);
 
         Self::signals_render(map, time, cam, &ctx.gfx.frustrum, draw);
 

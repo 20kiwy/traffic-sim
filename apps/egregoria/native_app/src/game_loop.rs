@@ -83,8 +83,15 @@ impl engine::framework::State for State {
         let carto = maptools::load_osm_map(&mut *sim.map_mut(), &ways_src, xml_src.as_deref());
 
         // Keep the traffic simulation alive (economy removed): random
-        // vehicles drive the imported network.
-        simulation::world_command::WorldCommand::SpawnRandomCars { n_cars: 150 }.apply(&mut sim);
+        // vehicles drive the imported network. EGRE_CARS overrides the
+        // count (0 = roads only — handy for software-rendered verification).
+        let n_cars: usize = std::env::var("EGRE_CARS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(150);
+        if n_cars > 0 {
+            simulation::world_command::WorldCommand::SpawnRandomCars { n_cars }.apply(&mut sim);
+        }
         let game_schedule = Simulation::schedule();
         let mut uiworld = UiWorld::init();
 
@@ -107,20 +114,44 @@ impl engine::framework::State for State {
         // Hand the cartography data to the renderer/UI and fit the camera
         // to the full OSM tile extent.
         uiworld.insert(carto);
+
+        // Start at noon — neutral overhead sun so the openstreetmap-carto
+        // palette reads true (the 08:00 start's low warm sun tinted every
+        // wall pink).
+        {
+            const NOON_TICK: u64 = prototypes::TICKS_PER_SECOND * 4 * 3600;
+            *sim.write::<GameTime>() = GameTime::new(prototypes::Tick(NOON_TICK));
+        }
+
         if let Some(g) = uiworld.read::<maptools::CartoData>().ground {
             let center = geom::vec2((g.ll.x + g.ur.x) * 0.5, (g.ll.y + g.ur.y) * 0.5);
             let size = (g.ur.x - g.ll.x).max(g.ur.y - g.ll.y);
             // EGRE_FIT tunes how much of the screen the OSM tile fills.
-            let fit: f32 = std::env::var("EGRE_FIT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.75);
-            uiworld.camera_mut().fit_to(center, size * fit);
+            // Unset = 0.75 (fit the whole tile); 0 or negative = keep the
+            // camera3D save (no fit) for scripted close-up verification.
+            match std::env::var("EGRE_FIT").ok().and_then(|v| v.parse::<f32>().ok()) {
+                Some(f) if f > 0.0 => uiworld.camera_mut().fit_to(center, size * f),
+                Some(_) => {}
+                None => uiworld.camera_mut().fit_to(center, size * 0.75),
+            }
         }
 
         log::info!("version is {}", VERSION);
 
         {
+            // Flat carto shading in the OSM map mode (no terrain chunks):
+            // shadow cascades over a 1.5 km flat quad produce acne ripples,
+            // SSAO produces blue-noise moiré, distance fog washes the map
+            // into the sky color. A map view wants flat, fog-free light.
+            let no_terrain = sim.map().environment.size() == (0, 0);
+            {
+                let mut st = uiworld.write::<Settings>();
+                if no_terrain {
+                    st.gfx.shadows = engine::ShadowQuality::NoShadows;
+                    st.gfx.ssao = false;
+                    st.gfx.fog = false;
+                }
+            }
             let s = uiworld.read::<Settings>();
             manage_settings(ctx, &s);
         }
@@ -258,6 +289,7 @@ impl engine::framework::State for State {
             },
             &mut self.uiw.write::<ImmediateDraw>(),
             ctx,
+            Some(&self.uiw.read::<maptools::CartoData>()),
         );
 
         self.instanced_renderer
@@ -382,15 +414,29 @@ impl State {
         drop(map);
     }
 
-    /// Tessellates the OSM carto layers into an opaque mesh with depth.
+    /// Depth-quantum drop for the flat carto stack.
+    ///
+    /// The ground quad sits at z=0 and the road surface 0.2 m above it. With
+    /// the reversed-z perspective (near = 1.0) the depth quantum at distance
+    /// `d` is `d² / 2²⁴` — at fitted-tile zoom (~2 km) that is ~0.25 m, so
+    /// the flat stack TIES with the road layer and the road grid loses the
+    /// depth test. Dropping the stack by 1.5× the quantum separates it
+    /// deterministically while staying invisible: at 2 km the drop is
+    /// ~0.4 m ≈ 0.2 px, at street level (~50 m) it is 2 mm.
+    fn carto_drop(cam_dist: f32) -> f32 {
+        ((cam_dist * cam_dist) / 16777216.0 * 1.5).max(0.02)
+    }
+
+    /// Tessellates the OSM carto layers into the bottom-layer mesh.
     fn carto_draw(&mut self, ctx: &mut FrameContext) {
         profiling::scope!("carto_draw");
         self.carto_renderer.clear();
         let mut tess = self.carto_renderer.mk_tess();
+        let cam_dist = self.uiw.read::<OrbitCamera>().camera.dist;
         self.uiw.read::<OrbitCamera>().cull_tess(&mut tess);
         {
             let carto = self.uiw.read::<maptools::CartoData>();
-            crate::rendering::cartography::draw_carto(&carto, &mut tess);
+            crate::rendering::cartography::draw_carto(&carto, &mut tess, Self::carto_drop(cam_dist));
         }
         if let Some(x) = self.carto_renderer.build(ctx.gfx) {
             ctx.draw(x);

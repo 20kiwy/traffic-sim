@@ -14,6 +14,7 @@
 //!   so flyovers render elevated with real data.
 //! * Projection matches the egui app exactly (`GEO_ANCHOR`, equirectangular).
 
+pub mod carto;
 pub mod overpass;
 pub mod schema;
 
@@ -79,12 +80,14 @@ pub struct BridgeInfo {
 }
 
 /// Cartography data produced by the import and consumed by the app
-/// (ground extent, flat water/park polygons, bridge + road metadata).
+/// (ground extent, flat landcover/water polygons, bridge + road metadata).
 #[derive(Default)]
 pub struct CartoData {
     pub ground: Option<AABB>,
+    /// Landcover / landuse polygons tagged with the openstreetmap-carto
+    /// `@var` that paints them (resolved by [`carto::CartoStyle::area_var`]).
+    pub areas: Vec<(&'static str, Vec<Vec2>)>,
     pub water: Vec<Vec<Vec2>>,
-    pub parks: Vec<Vec<Vec2>>,
     pub buildings: usize,
     pub roads: usize,
     pub bridges: Vec<BridgeInfo>,
@@ -421,13 +424,13 @@ pub fn load_osm_map(map: &mut Map, ways_json: &str, overpass_xml: Option<&str>) 
     map.osm_finish();
 
     log::info!(
-        "maptools: OSM import done in {:.1}s — {} roads, {} bridges, {} buildings, {} water, {} parks",
+        "maptools: OSM import done in {:.1}s — {} roads, {} bridges, {} buildings, {} water, {} landcover areas",
         t.elapsed().as_secs_f32(),
         carto.roads,
         carto.bridges.len(),
         carto.buildings,
         carto.water.len(),
-        carto.parks.len()
+        carto.areas.len()
     );
 
     carto

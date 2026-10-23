@@ -61,6 +61,13 @@ fn auto_save(uiworld: &UiWorld) {
 fn power_errors(uiworld: &UiWorld, sim: &Simulation) {
     profiling::scope!("hud::power_errors");
     let map = sim.map();
+    // The OSM carto build (no terrain chunks) has no electricity game:
+    // imported buildings sit on producer-less networks, so every one of
+    // them would float the red "no power" icon — thousands of pink rings
+    // over the cartography (the notorious "pink dots").
+    if map.environment.size() == (0, 0) {
+        return;
+    }
     let flow = sim.read::<ElectricityFlow>();
 
     let no_power_img = uiworld.read::<UiTextures>().get("no_power");

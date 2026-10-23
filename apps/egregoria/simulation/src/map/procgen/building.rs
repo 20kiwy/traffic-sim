@@ -70,8 +70,10 @@ pub fn gen_exterior_house(size: f32, seed: u64) -> (ColoredMesh, Vec2) {
             p.simplify();
         }
 
+        // Fill the footprint: the base rectangle is 15-28 m wide, so the
+        // 40 divisor left OSM buildings at ~40% of their real size.
         for x in p.iter_mut() {
-            *x *= size / 40.0;
+            *x *= size / 26.0;
         }
 
         let c = p.bbox().center();

@@ -1,15 +1,19 @@
 //! Overpass XML extracts — supplementary cartography layers
-//! (buildings, water, parks) parsed from the same `.osm` files the
-//! traffic-sim project stores next to the compact ways JSON.
+//! (buildings, water, landcover/landuse) parsed from the same `.osm` files
+//! the traffic-sim project stores next to the compact ways JSON.
+//!
+//! Every polygon is tagged with the openstreetmap-carto `@var` that paints
+//! it (resolved through [`carto::CartoStyle::area_var`]) so the renderer
+//! stays 100% data-driven — same palette as the map-launcher tile server.
 
 use common::FastMap;
 use geom::{vec2, OBB, Polygon, Vec2};
 use prototypes::BuildingGen;
 use simulation::map::{BuildingKind, Map};
 
-use crate::{poly_obb, CartoData};
+use crate::{carto, poly_obb, CartoData};
 
-pub fn load(xml: &str, map: &mut Map, carto: &mut CartoData) {
+pub fn load(xml: &str, map: &mut Map, carto_data: &mut CartoData) {
     let doc = match roxmltree::Document::parse(xml) {
         Ok(d) => d,
         Err(e) => {
@@ -63,16 +67,29 @@ pub fn load(xml: &str, map: &mut Map, carto: &mut CartoData) {
             continue;
         }
 
-        // buildings
+        // buildings (carto @building-fill — colors come from colors.lua)
         if tag("building").is_some() && tag("building").unwrap() != "no" {
             if let Some(obb) = poly_obb(&pts) {
                 if map
                     .build_special_building(&obb, BuildingKind::House, BuildingGen::House, None, None)
                     .is_some()
                 {
-                    carto.buildings += 1;
+                    carto_data.buildings += 1;
                 }
-                carto.grow_bounds(&pts);
+                carto_data.grow_bounds(&pts);
+            }
+            // Built-up ground: the extract carries no landuse=residential
+            // polygons, so the residential @var halo is derived from the
+            // real building footprints (expanded ~1.8x) — the same visual
+            // job landuse polygons do on the openstreetmap-carto map at
+            // z12-13, and it makes the white road casings read.
+            let centroid = pts.iter().fold(Vec2::ZERO, |a, p| a + *p) / pts.len() as f32;
+            let halo: Vec<Vec2> = pts
+                .iter()
+                .map(|p| centroid + (*p - centroid) * 1.8)
+                .collect();
+            if Polygon(halo.clone()).area() > 30.0 {
+                carto_data.areas.push(("residential", halo));
             }
             continue;
         }
@@ -87,23 +104,50 @@ pub fn load(xml: &str, map: &mut Map, carto: &mut CartoData) {
             || !water.is_empty()
         {
             if Polygon(pts.clone()).area() > 30.0 {
-                carto.grow_bounds(&pts);
-                carto.water.push(pts);
+                carto_data.grow_bounds(&pts);
+                carto_data.water.push(pts);
             }
             continue;
         }
 
-        // parks / green areas
-        let leisure = tag("leisure").unwrap_or("");
-        if matches!(leisure, "park" | "garden" | "pitch" | "playground" | "golf_course")
-            || matches!(natural, "wood" | "grass" | "scrub" | "forest" | "wetland")
-        {
+        // landcover / landuse — tagged with the carto @var that paints it
+        if let Some(var) = landcover_var(&tag) {
             if Polygon(pts.clone()).area() > 30.0 {
-                carto.grow_bounds(&pts);
-                carto.parks.push(pts);
+                carto_data.grow_bounds(&pts);
+                carto_data.areas.push((var, pts));
             }
         }
     }
+}
+
+/// OSM tag set → openstreetmap-carto `@var`. Mirrors the map-launcher
+/// landcover.mss classification order (landuse → natural → leisure/amenity).
+fn landcover_var<'a>(tag: &impl Fn(&str) -> Option<&'a str>) -> Option<&'static str> {
+    let landuse = tag("landuse").unwrap_or("");
+    if let Some(var) = carto::CartoStyle::area_var(landuse) {
+        if landuse != "no" {
+            return Some(var);
+        }
+    }
+    let natural = tag("natural").unwrap_or("");
+    if !natural.is_empty() {
+        if let Some(var) = carto::CartoStyle::area_var(natural) {
+            return Some(var);
+        }
+    }
+    let leisure = tag("leisure").unwrap_or("");
+    if !leisure.is_empty() {
+        if let Some(var) = carto::CartoStyle::area_var(leisure) {
+            return Some(var);
+        }
+    }
+    let amenity = tag("amenity").unwrap_or("");
+    if !amenity.is_empty() {
+        if let Some(var) = carto::CartoStyle::area_var(amenity) {
+            return Some(var);
+        }
+    }
+    None
 }
 
 /// Re-exported for tests: minimal-area-ish OBB from a polygon footprint.

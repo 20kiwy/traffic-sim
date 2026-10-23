@@ -1,0 +1,7 @@
+[package]
+name = "carto-math"
+version = "0.2.0"
+edition = "2021"
+description = "Web-Mercator / tile math, line-polygon clipping, Douglas-Peucker (vendored 1:1 from 20kiwy/map-launcher)"
+
+[dependencies]

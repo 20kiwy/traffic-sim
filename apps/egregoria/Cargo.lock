@@ -400,6 +400,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "carto-math"
+version = "0.2.0"
+
+[[package]]
+name = "carto-style"
+version = "0.2.0"
+dependencies = [
+ "include_dir",
+]
+
+[[package]]
 name = "cc"
 version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1734,6 +1745,7 @@ name = "maptools"
 version = "0.1.0"
 dependencies = [
  "bridge",
+ "carto-style",
  "common",
  "flat_spatial",
  "geom",
